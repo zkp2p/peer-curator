@@ -90,7 +90,7 @@ const groupFileSchema = z.object({
         minimumMembers: z.number().int().nonnegative(),
       }),
     )
-    .length(8),
+    .length(6),
 });
 
 export type Command = "calculate" | "verify" | "plan" | "sync";

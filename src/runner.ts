@@ -23,6 +23,7 @@ export async function run(
   logger.info(
     {
       calculatedAt: desired.calculatedAt,
+      indexerAccess: settings.indexerApiKey ? "api-key" : "public-rate-limited",
       blockedWalletCount: desired.blockedWalletCount,
       policies: [...desired.policies.values()].map((policy) => ({
         scope: policy.scope,

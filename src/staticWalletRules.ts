@@ -37,16 +37,17 @@ export const BLOCKED_WALLET_HASHES = [
 
 /**
  * The three legacy Peer President overrides, encoded the same way. All three
- * currently have TakerStats rows and also qualify naturally as Platinum.
+ * currently have TakerStats rows and also qualify naturally for the top band,
+ * which is folded into the public Pro tier.
  */
-export const HISTORICAL_PLATINUM_OVERRIDE_HASHES = [
+export const HISTORICAL_TOP_TIER_OVERRIDE_HASHES = [
   "0x5115328c977aca61cd9db195fe8b2c6ccf06172f43c394718be3bbf8a1b0c2f8",
   "0xb7f9b6d0b54f61e9294bfdfff140ed0a7cf7040de56fa3e22c6970f7a7710a7e",
   "0xdc338be77d50c3336de17671893cc76205b0959edb6c0a3d58b8ebedcc36c4a8",
 ] as const satisfies readonly Hex[];
 
 const blockedWalletHashSet = new Set<Hex>(BLOCKED_WALLET_HASHES);
-const historicalPlatinumOverrideHashSet = new Set<Hex>(HISTORICAL_PLATINUM_OVERRIDE_HASHES);
+const historicalTopTierOverrideHashSet = new Set<Hex>(HISTORICAL_TOP_TIER_OVERRIDE_HASHES);
 
 export function hashWallet(address: Address): Hex {
   return keccak256(address);
@@ -56,6 +57,6 @@ export function isBlockedWallet(address: Address): boolean {
   return blockedWalletHashSet.has(hashWallet(address));
 }
 
-export function isHistoricalPlatinumOverride(address: Address): boolean {
-  return historicalPlatinumOverrideHashSet.has(hashWallet(address));
+export function isHistoricalTopTierOverride(address: Address): boolean {
+  return historicalTopTierOverrideHashSet.has(hashWallet(address));
 }

@@ -5,7 +5,7 @@ import { calculateCurrentEarnPolicy, calculateHistoricalTakerPolicy } from "./po
 import {
   BLOCKED_WALLET_HASHES,
   isBlockedWallet,
-  isHistoricalPlatinumOverride,
+  isHistoricalTopTierOverride,
 } from "./staticWalletRules.js";
 
 export async function calculateDesiredSnapshot(
@@ -27,7 +27,7 @@ export async function calculateDesiredSnapshot(
   const historical = calculateHistoricalTakerPolicy({
     takerStats,
     isBlockedWallet,
-    isPlatinumOverride: isHistoricalPlatinumOverride,
+    isTopTierOverride: isHistoricalTopTierOverride,
   });
   const earn = calculateCurrentEarnPolicy({
     platformStats,

@@ -2,12 +2,13 @@ import type { Address } from "viem";
 import { emptyTierSets, type PolicySnapshot, type Tier } from "./domain.js";
 import type { MakerPeerPayStatsRow, MakerPlatformStatsRow, TakerStatsRow } from "./indexer.js";
 
-const TIER_ORDER = ["PEASANT", "PEER", "PLUS", "PRO", "PLATINUM"] as const;
+const TIER_ORDER = ["PEASANT", "PEER", "PLUS", "PRO", "TOP"] as const;
 type ComputedTier = (typeof TIER_ORDER)[number];
+type ComputedMemberTier = Exclude<ComputedTier, "PEASANT">;
 
 interface TierPolicy {
   scope: PolicySnapshot["scope"];
-  thresholds: Record<Tier, bigint>;
+  thresholds: Record<ComputedMemberTier, bigint>;
   lockScorePenaltyThresholds: readonly bigint[];
 }
 
@@ -17,7 +18,7 @@ export const HISTORICAL_TAKER_POLICY: TierPolicy = {
     PEER: 500_000_000n,
     PLUS: 2_000_000_000n,
     PRO: 10_000_000_000n,
-    PLATINUM: 25_000_000_000n,
+    TOP: 25_000_000_000n,
   },
   lockScorePenaltyThresholds: [50n, 200n, 500n, 1_000n],
 };
@@ -28,7 +29,7 @@ export const CURRENT_EARN_POLICY: TierPolicy = {
     PEER: 1_000_000_000n,
     PLUS: 10_000_000_000n,
     PRO: 50_000_000_000n,
-    PLATINUM: 100_000_000_000n,
+    TOP: 100_000_000_000n,
   },
   lockScorePenaltyThresholds: [100n, 400n, 1_000n, 2_000n],
 };
@@ -42,7 +43,7 @@ export function classifyTier(
   policy: TierPolicy,
 ): ComputedTier {
   let baseTier: ComputedTier = "PEASANT";
-  if (volume >= policy.thresholds.PLATINUM) baseTier = "PLATINUM";
+  if (volume >= policy.thresholds.TOP) baseTier = "TOP";
   else if (volume >= policy.thresholds.PRO) baseTier = "PRO";
   else if (volume >= policy.thresholds.PLUS) baseTier = "PLUS";
   else if (volume >= policy.thresholds.PEER) baseTier = "PEER";
@@ -58,7 +59,8 @@ export function classifyTier(
 
 function addMember(snapshot: PolicySnapshot, tier: ComputedTier, address: Address): void {
   if (tier === "PEASANT") return;
-  snapshot.membersByTier[tier].add(address);
+  const publicTier: Tier = tier === "TOP" ? "PRO" : tier;
+  snapshot.membersByTier[publicTier].add(address);
 }
 
 function assertExclusive(snapshot: PolicySnapshot): void {
@@ -76,7 +78,7 @@ function assertExclusive(snapshot: PolicySnapshot): void {
 export function calculateHistoricalTakerPolicy(input: {
   takerStats: TakerStatsRow[];
   isBlockedWallet: (address: Address) => boolean;
-  isPlatinumOverride: (address: Address) => boolean;
+  isTopTierOverride: (address: Address) => boolean;
 }): PolicySnapshot {
   const snapshot: PolicySnapshot = {
     scope: HISTORICAL_TAKER_POLICY.scope,
@@ -86,8 +88,8 @@ export function calculateHistoricalTakerPolicy(input: {
 
   for (const row of input.takerStats) {
     if (input.isBlockedWallet(row.owner)) continue;
-    const tier = input.isPlatinumOverride(row.owner)
-      ? "PLATINUM"
+    const tier = input.isTopTierOverride(row.owner)
+      ? "TOP"
       : classifyTier(
           row.totalFulfilledVolume,
           row.lockScore,

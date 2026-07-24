@@ -3,7 +3,7 @@
 ## Scope
 
 This repository owns the off-chain calculation and on-chain reconciliation of
-Peer-curated taker groups. It consumes production indexer aggregates, a
+Peer/Plus/Pro curated groups. It consumes production indexer aggregates, a
 committed hashed blocked-wallet snapshot, and `AddressGroupRegistry`.
 
 ## Safety

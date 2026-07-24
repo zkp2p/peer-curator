@@ -1,6 +1,6 @@
 import { type Address, isAddress } from "viem";
 
-export const TIERS = ["PEER", "PLUS", "PRO", "PLATINUM"] as const;
+export const TIERS = ["PEER", "PLUS", "PRO"] as const;
 export type Tier = (typeof TIERS)[number];
 
 export const POLICY_SCOPES = ["historical-taker", "current-earn"] as const;
@@ -48,7 +48,6 @@ export function emptyTierSets(): Record<Tier, Set<Address>> {
     PEER: new Set<Address>(),
     PLUS: new Set<Address>(),
     PRO: new Set<Address>(),
-    PLATINUM: new Set<Address>(),
   };
 }
 
@@ -65,7 +64,6 @@ export function tierCounts(snapshot: PolicySnapshot): Record<Tier, number> {
     PEER: snapshot.membersByTier.PEER.size,
     PLUS: snapshot.membersByTier.PLUS.size,
     PRO: snapshot.membersByTier.PRO.size,
-    PLATINUM: snapshot.membersByTier.PLATINUM.size,
   };
 }
 

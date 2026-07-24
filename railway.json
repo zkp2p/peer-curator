@@ -6,6 +6,7 @@
   },
   "deploy": {
     "startCommand": "node dist/cli.js sync",
+    "cronSchedule": "0 0 * * *",
     "restartPolicyType": "NEVER"
   }
 }

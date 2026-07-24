@@ -52,8 +52,11 @@ interface RawMakerPeerPayStats {
 
 const PAGE_SIZE = 1_000;
 const MAX_RETRIES = 5;
+const PUBLIC_REQUEST_INTERVAL_MS = 650;
 
 export class IndexerClient {
+  private nextPublicRequestAt = 0;
+
   public constructor(
     private readonly url: string,
     private readonly apiKey: string | undefined,
@@ -61,11 +64,21 @@ export class IndexerClient {
     private readonly timeoutMs: number,
   ) {}
 
+  private async waitForAccessSlot(): Promise<void> {
+    if (this.apiKey) return;
+    const now = Date.now();
+    const scheduledAt = Math.max(now, this.nextPublicRequestAt);
+    this.nextPublicRequestAt = scheduledAt + PUBLIC_REQUEST_INTERVAL_MS;
+    const delay = scheduledAt - now;
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+
   private async query<T>(query: string, variables: Record<string, unknown>): Promise<T> {
     let lastError: Error | undefined;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
       try {
+        await this.waitForAccessSlot();
         const headers: Record<string, string> = {
           "content-type": "application/json",
         };

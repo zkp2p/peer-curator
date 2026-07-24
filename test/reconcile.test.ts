@@ -30,7 +30,7 @@ function fixtures(): {
     TIERS.map((tier, tierIndex) => ({
       scope,
       tier,
-      groupId: BigInt(scopeIndex * 4 + tierIndex + 1),
+      groupId: BigInt(scopeIndex * TIERS.length + tierIndex + 1),
       minimumMembers: 0,
     })),
   );

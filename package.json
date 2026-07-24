@@ -1,8 +1,8 @@
 {
-  "name": "@zkp2p/taker-groups",
+  "name": "@zkp2p/peer-curator",
   "version": "0.1.0",
   "private": true,
-  "description": "Calculates and reconciles Peer-curated taker tiers into AddressGroupRegistry",
+  "description": "Calculates and reconciles Peer-curated groups into AddressGroupRegistry",
   "type": "module",
   "engines": {
     "node": ">=22"

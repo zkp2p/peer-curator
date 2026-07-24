@@ -19,37 +19,25 @@
       "scope": "historical-taker",
       "tier": "PRO",
       "groupId": "3",
-      "minimumMembers": 100
-    },
-    {
-      "scope": "historical-taker",
-      "tier": "PLATINUM",
-      "groupId": "4",
-      "minimumMembers": 50
+      "minimumMembers": 150
     },
     {
       "scope": "current-earn",
       "tier": "PEER",
-      "groupId": "5",
+      "groupId": "4",
       "minimumMembers": 350
     },
     {
       "scope": "current-earn",
       "tier": "PLUS",
-      "groupId": "6",
+      "groupId": "5",
       "minimumMembers": 120
     },
     {
       "scope": "current-earn",
       "tier": "PRO",
-      "groupId": "7",
-      "minimumMembers": 15
-    },
-    {
-      "scope": "current-earn",
-      "tier": "PLATINUM",
-      "groupId": "8",
-      "minimumMembers": 25
+      "groupId": "6",
+      "minimumMembers": 40
     }
   ]
 }

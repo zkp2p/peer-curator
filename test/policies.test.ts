@@ -28,7 +28,7 @@ describe("classifyTier", () => {
     expect(classifyTier(500_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PEER");
     expect(classifyTier(2_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PLUS");
     expect(classifyTier(10_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PRO");
-    expect(classifyTier(25_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PLATINUM");
+    expect(classifyTier(25_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("TOP");
   });
 
   it("demotes one level per crossed lock-score threshold", () => {
@@ -49,7 +49,7 @@ describe("classifyTier", () => {
 });
 
 describe("historical taker policy", () => {
-  it("applies blocklist precedence and Platinum overrides", () => {
+  it("applies blocklist precedence and folds top-tier overrides into Pro", () => {
     const peer = address("1");
     const blocked = address("2");
     const override = address("3");
@@ -75,11 +75,11 @@ describe("historical taker policy", () => {
         },
       ],
       isBlockedWallet: (candidate) => candidate === blocked,
-      isPlatinumOverride: (candidate) => candidate === override,
+      isTopTierOverride: (candidate) => candidate === override,
     });
 
     expect(snapshot.membersByTier.PEER).toEqual(new Set([peer]));
-    expect(snapshot.membersByTier.PLATINUM).toEqual(new Set([override]));
+    expect(snapshot.membersByTier.PRO).toEqual(new Set([override]));
     expect([...Object.values(snapshot.membersByTier).flatMap((set) => [...set])]).not.toContain(
       blocked,
     );
@@ -91,6 +91,7 @@ describe("current Earn policy", () => {
     const maker = address("4");
     const peerPayOnly = address("5");
     const blocked = address("6");
+    const topTier = address("7");
     const snapshot = calculateCurrentEarnPolicy({
       platformStats: [
         {
@@ -111,6 +112,12 @@ describe("current Earn policy", () => {
           paymentMethodHash: "a",
           totalAmountTakenPreEarnCutover: 200_000_000_000n,
         },
+        {
+          id: `8453_${topTier}_a`,
+          maker: topTier,
+          paymentMethodHash: "a",
+          totalAmountTakenPreEarnCutover: 100_000_000_000n,
+        },
       ],
       peerPayStats: [
         {
@@ -130,6 +137,7 @@ describe("current Earn policy", () => {
 
     expect(snapshot.membersByTier.PLUS).toEqual(new Set([maker]));
     expect(snapshot.membersByTier.PEER).toEqual(new Set([peerPayOnly]));
-    expect(classifyTier(100_000_000_000n, 0n, 0n, CURRENT_EARN_POLICY)).toBe("PLATINUM");
+    expect(snapshot.membersByTier.PRO).toEqual(new Set([topTier]));
+    expect(classifyTier(100_000_000_000n, 0n, 0n, CURRENT_EARN_POLICY)).toBe("TOP");
   });
 });

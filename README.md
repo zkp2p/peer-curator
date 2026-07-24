@@ -1,6 +1,6 @@
-# ZKP2P taker groups
+# Peer Curator
 
-Maintains two four-tier, exact-membership policy families in
+Calculates and maintains two three-tier, exact-membership policy families in
 `AddressGroupRegistry`:
 
 - `historical-taker`: the pre-Earn taker-volume tiers.
@@ -11,12 +11,20 @@ address hashes are in the committed denylist, calculates desired membership,
 reconstructs current registry membership from events, and submits the minimal
 add/remove transaction batches.
 
-## Tier policies
+## High-level tiers
 
-| Scope | Peer | Plus | Pro | Platinum | Lock-score thresholds |
-|---|---:|---:|---:|---:|---|
-| Historical taker | $500 | $2,000 | $10,000 | $25,000 | 50 / 200 / 500 / 1,000 |
-| Current Earn | $1,000 | $10,000 | $50,000 | $100,000 | 100 / 400 / 1,000 / 2,000 |
+The public groups are:
+
+- **Peer** — established participation.
+- **Plus** — higher-volume participation.
+- **Pro** — the highest public cohort.
+
+Starting volume bands before lock-score penalties:
+
+| Scope | Peer | Plus | Pro | Lock-score thresholds |
+|---|---:|---:|---:|---|
+| Historical taker | $500 | $2,000 | $10,000+ | 50 / 200 / 500 / 1,000 |
+| Current Earn | $1,000 | $10,000 | $50,000+ | 100 / 400 / 1,000 / 2,000 |
 
 Historical volume is `TakerStats.totalFulfilledVolume`. Current Earn volume is:
 
@@ -28,7 +36,9 @@ sum(MakerPlatformStats.totalAmountTakenPreEarnCutover)
 Both policies dilute `lockScore` by
 `max(TakerStats.totalFulfilledVolume, 250 USDC)` and demote one tier per crossed
 threshold. The former President override set is also committed as address
-hashes; all three entries currently qualify naturally as Platinum.
+hashes; all three entries map to Pro. The preserved legacy calculation has an
+additional internal top band so lock-score demotions remain faithful, but that
+band is folded into the public Pro group.
 
 ## Static blocked-wallet snapshot
 
@@ -67,18 +77,42 @@ JSON source file to sorted hashes without printing the source wallets.
 Requires Node 22 and pnpm.
 
 ```bash
+git clone git@github.com:zkp2p/peer-curator.git
+cd peer-curator
 corepack enable
 pnpm install --frozen-lockfile
 cp .env.example .env
 ```
 
 `calculate` and `verify` work against the public production indexer without
-secrets or a group configuration. Set `INDEXER_API_KEY` for a higher rate
-limit.
+secrets or a group configuration:
+
+```bash
+pnpm calculate
+pnpm verify -- 0xYourWallet
+```
+
+When `INDEXER_API_KEY` is present, requests include it as `x-api-key` and use
+the proxy's higher keyed quota. When it is absent, the client automatically
+uses public access and paces requests below the 100 requests/minute public
+limit. Public runs are therefore slower but produce the same result.
+
+Provide the optional key either in `.env`:
+
+```text
+INDEXER_API_KEY=your-key
+```
+
+or in the current shell:
+
+```bash
+export INDEXER_API_KEY=your-key
+pnpm calculate
+```
 
 For `plan` or `sync`, copy `config/groups.example.json` to the untracked
 `config/groups.json`, then set the real registry address, deployment block,
-and eight group IDs. Group names are event-only in the contract, so this file
+and six group IDs. Group names are event-only in the contract, so this file
 is the durable `(chainId, registryAddress, groupId)` manifest.
 
 Runtime credentials:
@@ -137,11 +171,11 @@ Recommended rollout:
 
 ## Cron deployment
 
-The Docker image executes one `sync` run and exits. Configure a single Railway
-cron service with the desired schedule, for example every 15 minutes:
+The Docker image executes one `sync` run and exits. `railway.json` configures
+one run every 24 hours at midnight UTC:
 
 ```text
-*/15 * * * *
+0 0 * * *
 ```
 
 Keep `EXECUTE=false` until staging validation and an explicit production
