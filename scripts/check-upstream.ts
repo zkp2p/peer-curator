@@ -12,7 +12,6 @@ interface SurfaceCheck {
 const workspace = resolve(process.env.WORKSPACE_ROOT ?? "..");
 const contractsRepo = resolve(workspace, "zkp2p-v2-contracts");
 const indexerRepo = resolve(workspace, "zkp2p-indexer");
-const curatorRepo = resolve(workspace, "curator");
 
 function show(repo: string, ref: string, path: string): string {
   return execFileSync("git", ["-C", repo, "show", `${ref}:${path}`], {
@@ -45,11 +44,10 @@ const contractSource = show(
 );
 const productionIndexerSchema = show(indexerRepo, "origin/releases/prod", "schema.graphql");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
-const productionCuratorSchema = show(curatorRepo, "origin/releases/prod", "prisma/schema.prisma");
 
 const runtimeChecks = [
   check({
-    producer: "zkp2p-contracts",
+    producer: "zkp2p-v2-contracts",
     ref: "origin/main",
     surface: "AddressGroupRegistry",
     content: contractSource,
@@ -72,13 +70,6 @@ const runtimeChecks = [
       "type MakerPeerPayStats",
       "ppTakenPostEarnCutover: BigInt!",
     ],
-  }),
-  check({
-    producer: "curator",
-    ref: "origin/releases/prod",
-    surface: "BlockedWallet",
-    content: productionCuratorSchema,
-    required: ["model BlockedWallet", "walletAddress String"],
   }),
 ];
 

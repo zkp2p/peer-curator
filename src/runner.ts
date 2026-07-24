@@ -3,7 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { calculateDesiredSnapshot } from "./calculate.js";
 import type { RuntimeSettings } from "./config.js";
-import { tierCounts } from "./domain.js";
+import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
 import type { Logger } from "./logger.js";
 import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
 import {
@@ -11,10 +11,14 @@ import {
   assertPlanSafe,
   buildReconciliationPlan,
 } from "./reconcile.js";
+import { isBlockedWallet } from "./staticWalletRules.js";
 
-export async function run(settings: RuntimeSettings, logger: Logger): Promise<void> {
+export async function run(
+  settings: RuntimeSettings,
+  logger: Logger,
+  verifyAddress?: string,
+): Promise<void> {
   const desired = await calculateDesiredSnapshot(settings);
-  assertDesiredSnapshotComplete(desired, settings.groups);
 
   logger.info(
     {
@@ -29,19 +33,41 @@ export async function run(settings: RuntimeSettings, logger: Logger): Promise<vo
     "Desired group membership calculated",
   );
 
+  if (settings.command === "verify") {
+    if (!verifyAddress) throw new Error("verify requires a wallet address");
+    const address = normalizeAddress(verifyAddress, "verification wallet");
+    const historical = desired.policies.get("historical-taker");
+    const earn = desired.policies.get("current-earn");
+    if (!historical || !earn) throw new Error("Calculated policy snapshot is incomplete");
+    logger.info(
+      {
+        blocked: isBlockedWallet(address),
+        tiers: {
+          historicalTaker: tierForAddress(historical, address),
+          currentEarn: tierForAddress(earn, address),
+        },
+      },
+      "Wallet tier verified",
+    );
+    return;
+  }
+
   if (settings.command === "calculate") return;
+  if (!settings.groups) throw new Error("Group configuration is required");
+  const groups = settings.groups;
+  assertDesiredSnapshotComplete(desired, groups);
   if (!settings.rpcUrl) throw new Error("RPC_URL is required");
 
   const publicClient = createPublicClient({
     chain: base,
     transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
   });
-  const onchain = await loadRegistryState(publicClient, settings.groups, settings.logBlockRange);
+  const onchain = await loadRegistryState(publicClient, groups, settings.logBlockRange);
   const account = settings.execute
     ? privateKeyToAccount(settings.groupAdminPrivateKey as `0x${string}`)
     : undefined;
   assertRegistryGovernance({
-    config: settings.groups,
+    config: groups,
     state: onchain,
     requireZeroResolver: settings.requireZeroResolver,
     ...(account ? { signer: account } : {}),
@@ -49,7 +75,7 @@ export async function run(settings: RuntimeSettings, logger: Logger): Promise<vo
 
   const plan = buildReconciliationPlan({
     desired,
-    config: settings.groups,
+    config: groups,
     onchain,
     batchSize: settings.batchSize,
   });
@@ -95,7 +121,7 @@ export async function run(settings: RuntimeSettings, logger: Logger): Promise<vo
     publicClient,
     walletClient,
     account,
-    registryAddress: settings.groups.registryAddress,
+    registryAddress: groups.registryAddress,
     mutations: plan.mutations,
   });
   logger.info(

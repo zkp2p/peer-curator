@@ -56,7 +56,7 @@ const MAX_RETRIES = 5;
 export class IndexerClient {
   public constructor(
     private readonly url: string,
-    private readonly apiKey: string,
+    private readonly apiKey: string | undefined,
     private readonly chainId: number,
     private readonly timeoutMs: number,
   ) {}
@@ -66,12 +66,13 @@ export class IndexerClient {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
       try {
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+        };
+        if (this.apiKey) headers["x-api-key"] = this.apiKey;
         const response = await fetch(this.url, {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": this.apiKey,
-          },
+          headers,
           body: JSON.stringify({ query, variables }),
           signal: AbortSignal.timeout(this.timeoutMs),
         });

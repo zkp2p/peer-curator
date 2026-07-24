@@ -68,3 +68,10 @@ export function tierCounts(snapshot: PolicySnapshot): Record<Tier, number> {
     PLATINUM: snapshot.membersByTier.PLATINUM.size,
   };
 }
+
+export function tierForAddress(snapshot: PolicySnapshot, address: Address): Tier | "PEASANT" {
+  for (const tier of TIERS) {
+    if (snapshot.membersByTier[tier].has(address)) return tier;
+  }
+  return "PEASANT";
+}

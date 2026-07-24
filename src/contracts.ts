@@ -1,7 +1,7 @@
 import { parseAbi, parseAbiItem } from "viem";
 
 /**
- * Minimal runtime surface copied from zkp2p/zkp2p-contracts main at
+ * Minimal runtime surface copied from zkp2p/zkp2p-v2-contracts main at
  * 764a125d7a859184127a36c44de3beaf5611c0d5.
  */
 export const addressGroupRegistryAbi = parseAbi([

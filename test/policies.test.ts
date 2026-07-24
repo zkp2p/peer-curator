@@ -1,6 +1,6 @@
 import type { Address } from "viem";
 import { describe, expect, it } from "vitest";
-import { normalizeAddress } from "../src/domain.js";
+import { emptyTierSets, normalizeAddress, tierForAddress } from "../src/domain.js";
 import {
   CURRENT_EARN_POLICY,
   calculateCurrentEarnPolicy,
@@ -12,6 +12,17 @@ import {
 const address = (digit: string): Address => normalizeAddress(`0x${digit.repeat(40)}`);
 
 describe("classifyTier", () => {
+  it("looks up exact-tier membership and defaults to Peasant", () => {
+    const peer = address("1");
+    const outsider = address("2");
+    const membersByTier = emptyTierSets();
+    membersByTier.PEER.add(peer);
+    const snapshot = { scope: "historical-taker" as const, membersByTier, sourceRows: 1 };
+
+    expect(tierForAddress(snapshot, peer)).toBe("PEER");
+    expect(tierForAddress(snapshot, outsider)).toBe("PEASANT");
+  });
+
   it("uses inclusive historical volume thresholds", () => {
     expect(classifyTier(499_999_999n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PEASANT");
     expect(classifyTier(500_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PEER");
@@ -56,9 +67,15 @@ describe("historical taker policy", () => {
           totalFulfilledVolume: 50_000_000_000n,
           lockScore: 0n,
         },
+        {
+          id: `8453_${override}`,
+          owner: override,
+          totalFulfilledVolume: 1n,
+          lockScore: 0n,
+        },
       ],
-      blockedWallets: new Set([blocked]),
-      platinumOverrides: new Set([override]),
+      isBlockedWallet: (candidate) => candidate === blocked,
+      isPlatinumOverride: (candidate) => candidate === override,
     });
 
     expect(snapshot.membersByTier.PEER).toEqual(new Set([peer]));
@@ -108,7 +125,7 @@ describe("current Earn policy", () => {
         },
       ],
       takerStats: [],
-      blockedWallets: new Set([blocked]),
+      isBlockedWallet: (candidate) => candidate === blocked,
     });
 
     expect(snapshot.membersByTier.PLUS).toEqual(new Set([maker]));

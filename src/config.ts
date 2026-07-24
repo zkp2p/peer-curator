@@ -17,6 +17,11 @@ const booleanFromString = z
   .default("false")
   .transform((value) => value === "true");
 
+const optionalNonEmptyString = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().min(1).optional(),
+);
+
 const positiveInteger = (fallback: string) =>
   z
     .string()
@@ -44,18 +49,20 @@ const nonNegativeInteger = (fallback: string) =>
     });
 
 const envSchema = z.object({
-  INDEXER_GRAPHQL_URL: z.url(),
-  INDEXER_API_KEY: z.string().min(1, "INDEXER_API_KEY is required"),
-  CURATOR_DATABASE_URL: z.string().min(1, "CURATOR_DATABASE_URL is required"),
+  INDEXER_GRAPHQL_URL: z.url().default("https://indexer.zkp2p.xyz/v1/graphql"),
+  INDEXER_API_KEY: optionalNonEmptyString,
+  CHAIN_ID: positiveInteger("8453"),
   RPC_URL: z.string().optional(),
   GROUPS_CONFIG_PATH: z.string().default("config/groups.json"),
   GROUPS_CONFIG_JSON: z.string().optional(),
-  LEGACY_PLATINUM_OVERRIDES: z.string().default(""),
   EXECUTE: booleanFromString,
-  GROUP_ADMIN_PRIVATE_KEY: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{64}$/)
-    .optional(),
+  GROUP_ADMIN_PRIVATE_KEY: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/)
+      .optional(),
+  ),
   REQUIRE_ZERO_RESOLVER: z
     .enum(["true", "false"])
     .default("true")
@@ -86,16 +93,15 @@ const groupFileSchema = z.object({
     .length(8),
 });
 
-export type Command = "calculate" | "plan" | "sync";
+export type Command = "calculate" | "verify" | "plan" | "sync";
 
 export interface RuntimeSettings {
   command: Command;
+  chainId: number;
   indexerUrl: string;
-  indexerApiKey: string;
-  curatorDatabaseUrl: string;
+  indexerApiKey?: string;
   rpcUrl?: string;
-  groups: GroupsConfig;
-  legacyPlatinumOverrides: Set<ReturnType<typeof normalizeAddress>>;
+  groups?: GroupsConfig;
   execute: boolean;
   groupAdminPrivateKey?: `0x${string}`;
   requireZeroResolver: boolean;
@@ -159,8 +165,14 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     throw new Error("BATCH_SIZE cannot exceed 200");
   }
 
-  const groups = await readGroupsConfig(env.GROUPS_CONFIG_JSON, env.GROUPS_CONFIG_PATH);
-  const rpcRequired = command !== "calculate";
+  const groups =
+    command === "plan" || command === "sync"
+      ? await readGroupsConfig(env.GROUPS_CONFIG_JSON, env.GROUPS_CONFIG_PATH)
+      : undefined;
+  if (groups && groups.chainId !== env.CHAIN_ID) {
+    throw new Error("CHAIN_ID does not match the group configuration");
+  }
+  const rpcRequired = command === "plan" || command === "sync";
   if (rpcRequired && !env.RPC_URL) {
     throw new Error("RPC_URL is required for plan and sync");
   }
@@ -168,21 +180,13 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     throw new Error("GROUP_ADMIN_PRIVATE_KEY is required when EXECUTE=true");
   }
 
-  const overrides = new Set(
-    env.LEGACY_PLATINUM_OVERRIDES.split(",")
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .map((value) => normalizeAddress(value, "LEGACY_PLATINUM_OVERRIDES entry")),
-  );
-
   return {
     command,
+    chainId: env.CHAIN_ID,
     indexerUrl: env.INDEXER_GRAPHQL_URL,
-    indexerApiKey: env.INDEXER_API_KEY,
-    curatorDatabaseUrl: env.CURATOR_DATABASE_URL,
+    ...(env.INDEXER_API_KEY ? { indexerApiKey: env.INDEXER_API_KEY } : {}),
     ...(env.RPC_URL ? { rpcUrl: env.RPC_URL } : {}),
-    groups,
-    legacyPlatinumOverrides: overrides,
+    ...(groups ? { groups } : {}),
     execute: command === "sync" && env.EXECUTE,
     ...(env.GROUP_ADMIN_PRIVATE_KEY
       ? { groupAdminPrivateKey: env.GROUP_ADMIN_PRIVATE_KEY as `0x${string}` }

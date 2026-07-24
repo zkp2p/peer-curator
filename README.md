@@ -6,10 +6,10 @@ Maintains two four-tier, exact-membership policy families in
 - `historical-taker`: the pre-Earn taker-volume tiers.
 - `current-earn`: the frozen Earn qualification tiers.
 
-The service pulls authenticated production indexer aggregates, removes every
-wallet in Curator's production `BlockedWallet` table, calculates desired
-membership, reconstructs current registry membership from events, and submits
-the minimal add/remove transaction batches.
+The service pulls production indexer aggregates, excludes wallets whose
+address hashes are in the committed denylist, calculates desired membership,
+reconstructs current registry membership from events, and submits the minimal
+add/remove transaction batches.
 
 ## Tier policies
 
@@ -27,15 +27,31 @@ sum(MakerPlatformStats.totalAmountTakenPreEarnCutover)
 
 Both policies dilute `lockScore` by
 `max(TakerStats.totalFulfilledVolume, 250 USDC)` and demote one tier per crossed
-threshold. `LEGACY_PLATINUM_OVERRIDES` preserves the former President override
-set without committing wallet identifiers.
+threshold. The former President override set is also committed as address
+hashes; all three entries currently qualify naturally as Platinum.
+
+## Static blocked-wallet snapshot
+
+`src/staticWalletRules.ts` contains the 25 blocked wallets from Curator
+production as `keccak256` hashes of their normalized 20-byte addresses. The
+blocked-wallet check never calls Curator; only the tier aggregates come from
+the indexer. Given a wallet, any operator can hash it locally and reproduce
+the inclusion/exclusion decision.
+
+The snapshot date and count are documented beside the constants. Updating it
+is a reviewed source change: independently obtain the approved blocked-wallet
+set, normalize and hash each address, replace the constants, run the local
+comparison, and review the diff before deployment.
+
+`pnpm hash-wallets -- /path/to/wallets.txt` converts a newline-delimited or
+JSON source file to sorted hashes without printing the source wallets.
 
 ## Safety model
 
 - Exact-tier groups: a member belongs to one tier per policy family.
 - Current on-chain state comes from replaying `MemberAdded` and `MemberRemoved`
   from the configured registry deployment block.
-- Indexer, database, or RPC failures stop the run.
+- Indexer or RPC failures stop the run.
 - Missing GraphQL fields stop the run.
 - Nonexistent groups, unexpected resolvers, or a signer that is not the group
   owner stop execution.
@@ -53,19 +69,22 @@ Requires Node 22 and pnpm.
 ```bash
 corepack enable
 pnpm install --frozen-lockfile
-cp config/groups.example.json config/groups.json
 cp .env.example .env
 ```
 
-Set the real registry address, deployment block, and eight group IDs in the
-untracked `config/groups.json`. Group names are event-only in the contract, so
-this file is the durable `(chainId, registryAddress, groupId)` manifest.
+`calculate` and `verify` work against the public production indexer without
+secrets or a group configuration. Set `INDEXER_API_KEY` for a higher rate
+limit.
 
-Required secrets:
+For `plan` or `sync`, copy `config/groups.example.json` to the untracked
+`config/groups.json`, then set the real registry address, deployment block,
+and eight group IDs. Group names are event-only in the contract, so this file
+is the durable `(chainId, registryAddress, groupId)` manifest.
 
-- `INDEXER_API_KEY`
-- `CURATOR_DATABASE_URL` — use a read-only production role.
-- `RPC_URL`
+Runtime credentials:
+
+- `INDEXER_API_KEY` — optional; public indexer access is rate-limited.
+- `RPC_URL` — required for `plan` and `sync`.
 - `GROUP_ADMIN_PRIVATE_KEY` — required only for execution.
 
 The private key must resolve to the owner returned by `getGroup` for every
@@ -75,11 +94,35 @@ configured group.
 
 ```bash
 pnpm calculate
+pnpm verify -- 0xYourWallet
+pnpm compare:local -- /path/to/group-seeds
+pnpm hash-wallets -- /path/to/wallets.txt
 pnpm plan
 pnpm sync
 pnpm check
 pnpm check:upstream
 ```
+
+## Why membership is reconstructed from events
+
+`AddressGroupRegistry.members(groupId, wallet)` answers whether one known
+wallet is a member, but the contract does not expose a function that lists
+every member. A reconciler needs that full current set so it can remove stale
+wallets as well as add missing ones.
+
+The service scans `MemberAdded` and `MemberRemoved` logs from the registry
+deployment block, sorts them by block and log position, and applies them in
+order:
+
+```text
+MemberAdded(group, wallet)   -> add wallet to the local set
+MemberRemoved(group, wallet) -> remove wallet from the local set
+```
+
+The resulting set is the current on-chain membership reconstructed from the
+chain's append-only history. `GroupCreated` logs and `getGroup` reads
+separately verify that each configured group exists and has the expected
+governance.
 
 Recommended rollout:
 

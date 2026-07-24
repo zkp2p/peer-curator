@@ -5,12 +5,15 @@ import { loadSettings } from "./config.js";
 import { createLogger } from "./logger.js";
 import { run } from "./runner.js";
 
-const command = z.enum(["calculate", "plan", "sync"]).parse(process.argv[2] ?? "calculate");
+const command = z
+  .enum(["calculate", "verify", "plan", "sync"])
+  .parse(process.argv[2] ?? "calculate");
 const settings = await loadSettings(command);
 const logger = createLogger(settings.logLevel);
 
 try {
-  await run(settings, logger);
+  const verifyAddress = process.argv.slice(3).find((argument) => argument !== "--");
+  await run(settings, logger, verifyAddress);
 } catch (error) {
   logger.fatal(
     {

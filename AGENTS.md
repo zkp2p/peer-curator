@@ -3,14 +3,14 @@
 ## Scope
 
 This repository owns the off-chain calculation and on-chain reconciliation of
-Peer-curated taker groups. It consumes production indexer aggregates, the
-Curator `BlockedWallet` table, and `AddressGroupRegistry`.
+Peer-curated taker groups. It consumes production indexer aggregates, a
+committed hashed blocked-wallet snapshot, and `AddressGroupRegistry`.
 
 ## Safety
 
-- Never log member addresses, indexer API keys, database URLs, RPC credentials,
-  or signing keys.
-- Every indexer/database/RPC failure is fail-closed. Never reconcile a partial
+- Never log member addresses, indexer API keys, RPC credentials, or signing
+  keys.
+- Every indexer/RPC failure is fail-closed. Never reconcile a partial
   desired set.
 - `calculate` and `plan` never transact.
 - `sync` transacts only with `EXECUTE=true`, a matching group-owner signer, and
@@ -23,6 +23,9 @@ Curator `BlockedWallet` table, and `AddressGroupRegistry`.
 ## Commands
 
 - `pnpm calculate` — calculate desired counts without RPC access.
+- `pnpm verify -- 0x...` — calculate and verify one wallet without logging it.
+- `pnpm compare:local -- /path/to/group-seeds` — compare counts without logging members.
+- `pnpm hash-wallets -- /path/to/file` — generate sorted wallet hashes offline.
 - `pnpm plan` — calculate and compare against on-chain state.
 - `pnpm sync` — plan; execute only when `EXECUTE=true`.
 - `pnpm check` — format/lint, typecheck, and test.

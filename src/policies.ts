@@ -75,8 +75,8 @@ function assertExclusive(snapshot: PolicySnapshot): void {
 
 export function calculateHistoricalTakerPolicy(input: {
   takerStats: TakerStatsRow[];
-  blockedWallets: Set<Address>;
-  platinumOverrides: Set<Address>;
+  isBlockedWallet: (address: Address) => boolean;
+  isPlatinumOverride: (address: Address) => boolean;
 }): PolicySnapshot {
   const snapshot: PolicySnapshot = {
     scope: HISTORICAL_TAKER_POLICY.scope,
@@ -85,8 +85,8 @@ export function calculateHistoricalTakerPolicy(input: {
   };
 
   for (const row of input.takerStats) {
-    if (input.blockedWallets.has(row.owner)) continue;
-    const tier = input.platinumOverrides.has(row.owner)
+    if (input.isBlockedWallet(row.owner)) continue;
+    const tier = input.isPlatinumOverride(row.owner)
       ? "PLATINUM"
       : classifyTier(
           row.totalFulfilledVolume,
@@ -97,11 +97,6 @@ export function calculateHistoricalTakerPolicy(input: {
     addMember(snapshot, tier, row.owner);
   }
 
-  for (const address of input.platinumOverrides) {
-    if (!input.blockedWallets.has(address)) {
-      snapshot.membersByTier.PLATINUM.add(address);
-    }
-  }
   assertExclusive(snapshot);
   return snapshot;
 }
@@ -110,7 +105,7 @@ export function calculateCurrentEarnPolicy(input: {
   platformStats: MakerPlatformStatsRow[];
   peerPayStats: MakerPeerPayStatsRow[];
   takerStats: TakerStatsRow[];
-  blockedWallets: Set<Address>;
+  isBlockedWallet: (address: Address) => boolean;
 }): PolicySnapshot {
   const snapshot: PolicySnapshot = {
     scope: CURRENT_EARN_POLICY.scope,
@@ -137,7 +132,7 @@ export function calculateCurrentEarnPolicy(input: {
   const takerByOwner = new Map(input.takerStats.map((row) => [row.owner, row]));
   const candidates = new Set([...preEarnVolume.keys(), ...postEarnPeerPayVolume.keys()]);
   for (const address of candidates) {
-    if (input.blockedWallets.has(address)) continue;
+    if (input.isBlockedWallet(address)) continue;
     const volume = (preEarnVolume.get(address) ?? 0n) + (postEarnPeerPayVolume.get(address) ?? 0n);
     const takerStats = takerByOwner.get(address);
     const tier = classifyTier(

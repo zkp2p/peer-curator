@@ -1,8 +1,12 @@
-import { getBlockedWallets } from "./blocklist.js";
 import type { RuntimeSettings } from "./config.js";
 import type { DesiredSnapshot } from "./domain.js";
 import { IndexerClient } from "./indexer.js";
 import { calculateCurrentEarnPolicy, calculateHistoricalTakerPolicy } from "./policies.js";
+import {
+  BLOCKED_WALLET_HASHES,
+  isBlockedWallet,
+  isHistoricalPlatinumOverride,
+} from "./staticWalletRules.js";
 
 export async function calculateDesiredSnapshot(
   settings: RuntimeSettings,
@@ -10,27 +14,26 @@ export async function calculateDesiredSnapshot(
   const indexer = new IndexerClient(
     settings.indexerUrl,
     settings.indexerApiKey,
-    settings.groups.chainId,
+    settings.chainId,
     settings.requestTimeoutMs,
   );
 
-  const [takerStats, platformStats, peerPayStats, blockedWallets] = await Promise.all([
+  const [takerStats, platformStats, peerPayStats] = await Promise.all([
     indexer.getTakerStats(),
     indexer.getMakerPlatformStats(),
     indexer.getMakerPeerPayStats(),
-    getBlockedWallets(settings.curatorDatabaseUrl, settings.requestTimeoutMs),
   ]);
 
   const historical = calculateHistoricalTakerPolicy({
     takerStats,
-    blockedWallets,
-    platinumOverrides: settings.legacyPlatinumOverrides,
+    isBlockedWallet,
+    isPlatinumOverride: isHistoricalPlatinumOverride,
   });
   const earn = calculateCurrentEarnPolicy({
     platformStats,
     peerPayStats,
     takerStats,
-    blockedWallets,
+    isBlockedWallet,
   });
 
   return {
@@ -38,7 +41,7 @@ export async function calculateDesiredSnapshot(
       [historical.scope, historical],
       [earn.scope, earn],
     ]),
-    blockedWalletCount: blockedWallets.size,
+    blockedWalletCount: BLOCKED_WALLET_HASHES.length,
     calculatedAt: new Date().toISOString(),
   };
 }

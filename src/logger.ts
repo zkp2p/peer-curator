@@ -7,7 +7,6 @@ export function createLogger(level: string) {
     redact: {
       paths: [
         "indexerApiKey",
-        "curatorDatabaseUrl",
         "rpcUrl",
         "groupAdminPrivateKey",
         "*.address",

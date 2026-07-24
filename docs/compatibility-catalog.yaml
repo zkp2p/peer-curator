@@ -3,4 +3,4 @@ repositories:
   - {path: protocol, class: coordination, automation: monitor}
   - {path: zkp2p-v2-contracts, class: owner, automation: guarded}
   - {path: zkp2p-indexer, class: owner, automation: guarded}
-  - {path: curator, class: owner, automation: guarded}
+  - {path: curator, class: provenance, automation: monitor}
