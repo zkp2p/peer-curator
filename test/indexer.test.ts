@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { normalizeAddress } from "../src/domain.js";
+import { normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import { IndexerClient } from "../src/indexer.js";
 
 const takerStatsResponse = {
@@ -61,11 +61,13 @@ describe("IndexerClient address-group membership", () => {
   const registryAddress = normalizeAddress("0x9999999999999999999999999999999999999999");
   const firstMember = "0x1111111111111111111111111111111111111111";
   const secondMember = "0x2222222222222222222222222222222222222222";
+  const firstGroupId = normalizeGroupId(`0x${"11".repeat(32)}`);
+  const secondGroupId = normalizeGroupId(`0x${"22".repeat(32)}`);
 
   function mockMembershipIndexer(options?: {
     indexedThroughBlock?: number;
     groups?: unknown[];
-    events?: unknown[];
+    members?: unknown[];
   }): ReturnType<typeof vi.fn> {
     const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as {
@@ -86,35 +88,32 @@ describe("IndexerClient address-group membership", () => {
         data = {
           AddressGroup:
             options?.groups ??
-            [1n, 2n].map((groupId) => ({
+            [firstGroupId, secondGroupId].map((groupId) => ({
               id: `8453_${registryAddress}_${groupId}`,
               chainId: 8453,
               registryAddress: registryAddress.toUpperCase(),
-              groupId: groupId.toString(),
+              groupId,
+              memberCount: 1,
             })),
         };
-      } else if (body.query.includes("AddressGroupMembershipEvents")) {
+      } else if (body.query.includes("ConfiguredAddressGroupMembers")) {
         data = {
-          AddressGroupMembershipEvent: options?.events ?? [
+          AddressGroupMember: options?.members ?? [
             {
-              id: "event-remove",
+              id: `8453_${registryAddress}_${firstGroupId}_${firstMember}`,
               chainId: 8453,
               registryAddress,
-              groupId: "1",
+              groupId: firstGroupId,
+              groupEntityId: `8453_${registryAddress}_${firstGroupId}`,
               member: firstMember,
-              present: false,
-              blockNumber: "110",
-              logIndex: "3",
             },
             {
-              id: "event-add",
+              id: `8453_${registryAddress}_${secondGroupId}_${secondMember}`,
               chainId: 8453,
               registryAddress,
-              groupId: "2",
+              groupId: secondGroupId,
+              groupEntityId: `8453_${registryAddress}_${secondGroupId}`,
               member: secondMember,
-              present: true,
-              blockNumber: "105",
-              logIndex: "7",
             },
           ],
         };
@@ -130,7 +129,7 @@ describe("IndexerClient address-group membership", () => {
     return fetchMock;
   }
 
-  it("reads a watermark and validates a bounded membership snapshot", async () => {
+  it("reads the current indexed membership projection at a pinned watermark", async () => {
     const fetchMock = mockMembershipIndexer();
     const client = new IndexerClient(
       "https://indexer.example/graphql",
@@ -139,73 +138,42 @@ describe("IndexerClient address-group membership", () => {
       1_000,
     );
 
+    expect(await client.getIndexedThroughBlock()).toBe(120n);
     const snapshot = await client.getAddressGroupMembershipSnapshot({
       registryAddress,
-      groupIds: [1n, 2n],
+      groupIds: [firstGroupId, secondGroupId],
       deploymentBlock: 100n,
-      snapshotBlock: 115n,
+      snapshotBlock: 120n,
     });
 
     expect(snapshot.indexedThroughBlock).toBe(120n);
-    expect(snapshot.snapshotBlock).toBe(115n);
-    expect(snapshot.events).toEqual([
-      expect.objectContaining({
-        groupId: 1n,
-        member: normalizeAddress(firstMember),
-        present: false,
-        blockNumber: 110n,
-        logIndex: 3n,
-      }),
-      expect.objectContaining({
-        groupId: 2n,
-        member: normalizeAddress(secondMember),
-        present: true,
-        blockNumber: 105n,
-        logIndex: 7n,
-      }),
-    ]);
-
-    const eventRequest = fetchMock.mock.calls
-      .map((call) => JSON.parse(String((call[1] as RequestInit).body)))
-      .find((body) => String(body.query).includes("AddressGroupMembershipEvents"));
-    expect(eventRequest.query).toContain("$throughBlock: numeric!");
-    expect(eventRequest.query).toContain("$groupIds: [numeric!]!");
-    expect(eventRequest.variables).toMatchObject({
-      registryAddress,
-      groupIds: ["1", "2"],
-      deploymentBlock: "100",
-      throughBlock: "115",
-    });
-  });
-
-  it("fails before reading membership when the indexer is behind", async () => {
-    const fetchMock = mockMembershipIndexer({ indexedThroughBlock: 114 });
-    const client = new IndexerClient(
-      "https://indexer.example/graphql",
-      "test-api-key",
-      8453,
-      1_000,
+    expect(snapshot.snapshotBlock).toBe(120n);
+    expect(snapshot.membersByGroupId.get(firstGroupId)).toEqual(
+      new Set([normalizeAddress(firstMember)]),
+    );
+    expect(snapshot.membersByGroupId.get(secondGroupId)).toEqual(
+      new Set([normalizeAddress(secondMember)]),
     );
 
-    await expect(
-      client.getAddressGroupMembershipSnapshot({
-        registryAddress,
-        groupIds: [1n, 2n],
-        deploymentBlock: 100n,
-        snapshotBlock: 115n,
-      }),
-    ).rejects.toThrow("Indexer has not processed the requested chain snapshot");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const memberRequest = fetchMock.mock.calls
+      .map((call) => JSON.parse(String((call[1] as RequestInit).body)))
+      .find((body) => String(body.query).includes("ConfiguredAddressGroupMembers"));
+    expect(memberRequest.query).toContain("$groupIds: [String!]!");
+    expect(memberRequest.variables).toMatchObject({
+      registryAddress,
+      groupIds: [firstGroupId, secondGroupId],
+    });
   });
 
   it("requires every configured group to have an indexed creation event", async () => {
     mockMembershipIndexer({
       groups: [
         {
-          id: `8453_${registryAddress}_1`,
+          id: `8453_${registryAddress}_${firstGroupId}`,
           chainId: 8453,
           registryAddress,
-          groupId: "1",
+          groupId: firstGroupId,
+          memberCount: 1,
         },
       ],
     });
@@ -219,35 +187,29 @@ describe("IndexerClient address-group membership", () => {
     await expect(
       client.getAddressGroupMembershipSnapshot({
         registryAddress,
-        groupIds: [1n, 2n],
+        groupIds: [firstGroupId, secondGroupId],
         deploymentBlock: 100n,
-        snapshotBlock: 115n,
+        snapshotBlock: 120n,
       }),
     ).rejects.toThrow("Indexer has not indexed every configured group");
   });
 
-  it("rejects duplicate block and log coordinates", async () => {
+  it("fails when group memberCount and enumerated members disagree", async () => {
     mockMembershipIndexer({
-      events: [
+      groups: [
         {
-          id: "event-one",
+          id: `8453_${registryAddress}_${firstGroupId}`,
           chainId: 8453,
           registryAddress,
-          groupId: "1",
-          member: firstMember,
-          present: true,
-          blockNumber: "110",
-          logIndex: "3",
+          groupId: firstGroupId,
+          memberCount: 2,
         },
         {
-          id: "event-two",
+          id: `8453_${registryAddress}_${secondGroupId}`,
           chainId: 8453,
           registryAddress,
-          groupId: "2",
-          member: secondMember,
-          present: true,
-          blockNumber: "110",
-          logIndex: "3",
+          groupId: secondGroupId,
+          memberCount: 1,
         },
       ],
     });
@@ -261,10 +223,10 @@ describe("IndexerClient address-group membership", () => {
     await expect(
       client.getAddressGroupMembershipSnapshot({
         registryAddress,
-        groupIds: [1n, 2n],
+        groupIds: [firstGroupId, secondGroupId],
         deploymentBlock: 100n,
-        snapshotBlock: 115n,
+        snapshotBlock: 120n,
       }),
-    ).rejects.toThrow("duplicate membership event ordering coordinates");
+    ).rejects.toThrow("memberCount does not match");
   });
 });

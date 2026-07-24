@@ -2,17 +2,17 @@ import { parseAbi } from "viem";
 
 /**
  * Minimal runtime surface copied from zkp2p/zkp2p-v2-contracts main at
- * 764a125d7a859184127a36c44de3beaf5611c0d5.
+ * ce038e6c23d7cfe8fdec52ee36330a74a8478d1b.
  */
 export const addressGroupRegistryAbi = parseAbi([
-  "function groupExists(uint256 groupId) view returns (bool)",
-  "function getGroup(uint256 groupId) view returns (address owner, address pendingOwner, address resolver, bool exists)",
-  "function members(uint256 groupId, address account) view returns (bool)",
-  "function addMembers(uint256 groupId, address[] members)",
-  "function removeMembers(uint256 groupId, address[] members)",
-  "event GroupCreated(uint256 indexed groupId, address indexed owner, string name)",
-  "event MemberAdded(uint256 indexed groupId, address indexed member)",
-  "event MemberRemoved(uint256 indexed groupId, address indexed member)",
+  "function groupExists(bytes32 groupId) view returns (bool)",
+  "function getGroup(bytes32 groupId) view returns (address curator, address pendingCurator, address resolver, bool isPublic, bool exists)",
+  "function members(bytes32 groupId, address account) view returns (bool)",
+  "function addMembers(bytes32 groupId, address[] members)",
+  "function removeMembers(bytes32 groupId, address[] members)",
+  "event GroupCreated(bytes32 indexed groupId, address indexed curator, string name)",
+  "event MemberAdded(bytes32 indexed groupId, address indexed member)",
+  "event MemberRemoved(bytes32 indexed groupId, address indexed member)",
 ]);
 
-export const CONTRACTS_UPSTREAM_COMMIT = "764a125d7a859184127a36c44de3beaf5611c0d5";
+export const CONTRACTS_UPSTREAM_COMMIT = "ce038e6c23d7cfe8fdec52ee36330a74a8478d1b";

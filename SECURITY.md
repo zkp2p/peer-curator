@@ -10,10 +10,10 @@
   format, local comparison, and effective tier changes.
 - Run one cron replica. Concurrent signers can race nonces even though registry
   writes are idempotent.
-- Treat an unexpected removal plan, schema error, resolver change, or ownership
+- Treat an unexpected removal plan, schema error, resolver change, or curator
   change as an incident. The process intentionally exits before transacting.
 - Treat a stale membership watermark, missing group-creation projection,
-  registry source-address drift, or incomplete event backfill as an incident.
+  registry source-address drift, or incomplete membership backfill as an incident.
   There is intentionally no RPC log fallback.
 - Keep `SNAPSHOT_CONFIRMATIONS` nonzero in production. Lowering the confirmation
   buffer increases the chance of reconciling indexer and RPC state from

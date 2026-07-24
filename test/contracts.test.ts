@@ -14,5 +14,10 @@ describe("AddressGroupRegistry ABI", () => {
     ] as const) {
       expect(getAbiItem({ abi: addressGroupRegistryAbi, name })).toBeDefined();
     }
+    const getGroup = getAbiItem({ abi: addressGroupRegistryAbi, name: "getGroup" });
+    expect(getGroup.type).toBe("function");
+    if (getGroup.type !== "function") throw new Error("getGroup ABI item is not a function");
+    expect(getGroup.inputs[0]?.type).toBe("bytes32");
+    expect(getGroup.outputs).toHaveLength(5);
   });
 });

@@ -6,6 +6,7 @@ import {
   type GroupsConfig,
   groupKey,
   normalizeAddress,
+  normalizeGroupId,
   POLICY_SCOPES,
   type PolicyScope,
   TIERS,
@@ -86,7 +87,7 @@ const groupFileSchema = z.object({
       z.object({
         scope: z.enum(POLICY_SCOPES),
         tier: z.enum(TIERS),
-        groupId: z.string().regex(/^[1-9]\d*$/),
+        groupId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
         minimumMembers: z.number().int().nonnegative(),
       }),
     )
@@ -121,7 +122,7 @@ function validateGroupCoverage(groups: GroupsConfig): void {
     throw new Error("Group configuration contains duplicate scope/tier entries");
   }
 
-  const ids = new Set(groups.groups.map((group) => group.groupId.toString()));
+  const ids = new Set(groups.groups.map((group) => group.groupId));
   if (ids.size !== groups.groups.length) {
     throw new Error("Group configuration reuses a groupId");
   }
@@ -148,7 +149,7 @@ async function readGroupsConfig(
     groups: parsed.groups.map((group) => ({
       scope: group.scope as PolicyScope,
       tier: group.tier as Tier,
-      groupId: BigInt(group.groupId),
+      groupId: normalizeGroupId(group.groupId),
       minimumMembers: group.minimumMembers,
     })),
   };

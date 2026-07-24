@@ -51,6 +51,24 @@ function check(input: {
   };
 }
 
+function checkAddressGroupBinding(input: {
+  ref: string;
+  surface: string;
+  content: string;
+}): SurfaceCheck {
+  const hasNonzeroAddress =
+    /- name: AddressGroupRegistry\s*\n\s+address:\s*["']0x(?!0{40})[0-9a-fA-F]{40}["']/m.test(
+      input.content,
+    );
+  return {
+    producer: "zkp2p-indexer",
+    ref: input.ref,
+    surface: input.surface,
+    status: hasNonzeroAddress ? "compatible" : "incompatible",
+    missing: hasNonzeroAddress ? [] : ["nonzero AddressGroupRegistry address binding"],
+  };
+}
+
 const contractSource = show(
   contractsRepo,
   "origin/main",
@@ -58,7 +76,8 @@ const contractSource = show(
 );
 const productionIndexerSchema = show(indexerRepo, "origin/releases/prod", "schema.graphql");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
-const mainIndexerConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
+const mainIndexerProductionConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
+const mainIndexerStagingConfig = show(indexerRepo, "origin/main", "config.base_staging.yaml");
 const mainAddressGroupHandler = show(
   indexerRepo,
   "origin/main",
@@ -77,6 +96,7 @@ const runtimeChecks = [
       "event MemberAdded",
       "event MemberRemoved",
       "function getGroup",
+      "bytes32 _groupId",
     ],
   }),
   check({
@@ -113,36 +133,47 @@ const membershipPrerequisiteChecks = [
     producer: "zkp2p-indexer",
     ref: "origin/main",
     surface: "AddressGroupRegistry event source",
-    content: mainIndexerConfig,
+    content: mainIndexerProductionConfig,
     required: [
       "name: AddressGroupRegistry",
-      "MemberAdded(uint256 indexed groupId, address indexed member)",
-      "MemberRemoved(uint256 indexed groupId, address indexed member)",
+      "MemberAdded(bytes32 indexed groupId, address indexed member)",
+      "MemberRemoved(bytes32 indexed groupId, address indexed member)",
     ],
   }),
   check({
     producer: "zkp2p-indexer",
     ref: "origin/main",
-    surface: "append-only address-group membership event schema",
+    surface: "current address-group membership schema",
     content: mainIndexerSchema,
     required: [
-      "type AddressGroupMembershipEvent",
-      "present: Boolean!",
-      "blockNumber: BigInt!",
-      "logIndex: BigInt!",
+      "type AddressGroup {",
+      "memberCount: Int!",
+      "type AddressGroupMember {",
+      "groupEntityId: String!",
+      "member: String!",
     ],
   }),
   check({
     producer: "zkp2p-indexer",
     ref: "origin/main",
-    surface: "append-only address-group membership event handler",
+    surface: "current address-group membership handler",
     content: mainAddressGroupHandler,
     required: [
-      "context.AddressGroupMembershipEvent.set",
-      "registryAddress",
-      "blockNumber",
-      "logIndex",
+      "context.AddressGroupMember.set",
+      "context.AddressGroupMember.deleteUnsafe",
+      "memberCount: group.memberCount + 1",
+      "memberCount: Math.max(0, group.memberCount - 1)",
     ],
+  }),
+  checkAddressGroupBinding({
+    ref: "origin/main",
+    surface: "staging AddressGroupRegistry source binding",
+    content: mainIndexerStagingConfig,
+  }),
+  checkAddressGroupBinding({
+    ref: "origin/main",
+    surface: "production AddressGroupRegistry source binding",
+    content: mainIndexerProductionConfig,
   }),
 ];
 
@@ -152,7 +183,7 @@ process.stdout.write(
       runtimeChecks,
       forwardChecks,
       membershipPrerequisiteChecks,
-      note: "Tier forward drift and the membership-event prerequisite must be resolved before the corresponding producer rollout.",
+      note: "Tier forward drift and every current-membership prerequisite must be resolved before the corresponding producer rollout.",
     },
     null,
     2,
@@ -160,7 +191,9 @@ process.stdout.write(
 );
 
 if (
-  [...runtimeChecks, ...membershipPrerequisiteChecks].some((item) => item.status === "incompatible")
+  [...runtimeChecks, ...forwardChecks, ...membershipPrerequisiteChecks].some(
+    (item) => item.status === "incompatible",
+  )
 ) {
   process.exitCode = 1;
 }

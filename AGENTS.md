@@ -4,7 +4,7 @@
 
 This repository owns the off-chain calculation and on-chain reconciliation of
 Peer/Plus/Pro curated groups. It consumes production indexer aggregates,
-indexed `AddressGroupRegistry` membership history, a committed hashed
+indexed `AddressGroup` / `AddressGroupMember` state, a committed hashed
 blocked-wallet snapshot, and pinned registry reads.
 
 ## Safety
@@ -12,13 +12,13 @@ blocked-wallet snapshot, and pinned registry reads.
 - Never log member addresses, indexer API keys, RPC credentials, or signing
   keys.
 - Every indexer/RPC failure is fail-closed. Never reconcile a partial desired
-  set or membership history.
+  set or membership projection.
 - `calculate` and `plan` never transact.
-- `sync` transacts only with `EXECUTE=true`, a matching group-owner signer, and
+- `sync` transacts only with `EXECUTE=true`, a matching group-curator signer, and
   all configured safety limits passing.
 - Simulate every batch and wait for its successful receipt.
 - Add memberships before removing old memberships.
-- Production group creation, ownership transfers, signing-key rotation, and
+- Production group creation, curator transfers, signing-key rotation, and
   deployment require separate explicit approval.
 
 ## Commands

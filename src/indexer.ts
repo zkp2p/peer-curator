@@ -1,5 +1,5 @@
 import type { Address } from "viem";
-import { normalizeAddress } from "./domain.js";
+import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
 
 export interface TakerStatsRow {
   id: string;
@@ -21,19 +21,8 @@ export interface MakerPeerPayStatsRow {
   ppTakenPostEarnCutover: bigint;
 }
 
-export interface IndexedMembershipEvent {
-  id: string;
-  chainId: number;
-  registryAddress: Address;
-  groupId: bigint;
-  member: Address;
-  present: boolean;
-  blockNumber: bigint;
-  logIndex: bigint;
-}
-
 export interface IndexedMembershipSnapshot {
-  events: IndexedMembershipEvent[];
+  membersByGroupId: Map<GroupId, Set<Address>>;
   snapshotBlock: bigint;
   indexedThroughBlock: bigint;
 }
@@ -67,22 +56,21 @@ interface RawMakerPeerPayStats {
   ppTakenPostEarnCutover: string;
 }
 
-interface RawMembershipEvent {
-  id: string;
-  chainId: number;
-  registryAddress: string;
-  groupId: string;
-  member: string;
-  present: boolean;
-  blockNumber: string;
-  logIndex: string;
-}
-
 interface RawAddressGroup {
   id: string;
   chainId: number;
   registryAddress: string;
   groupId: string;
+  memberCount: number;
+}
+
+interface RawAddressGroupMember {
+  id: string;
+  chainId: number;
+  registryAddress: string;
+  groupId: string;
+  groupEntityId: string;
+  member: string;
 }
 
 interface RawChainMetadata {
@@ -188,7 +176,7 @@ export class IndexerClient {
     return rows;
   }
 
-  private async getIndexedThroughBlock(): Promise<bigint> {
+  public async getIndexedThroughBlock(): Promise<bigint> {
     const query = `
       query IndexerSyncWatermark($chainId: Int!) {
         chain_metadata(
@@ -221,13 +209,13 @@ export class IndexerClient {
 
   private async getConfiguredAddressGroups(input: {
     registryAddress: Address;
-    groupIds: bigint[];
+    groupIds: GroupId[];
   }): Promise<RawAddressGroup[]> {
     const query = `
       query ConfiguredAddressGroups(
         $chainId: Int!
         $registryAddress: String!
-        $groupIds: [numeric!]!
+        $groupIds: [String!]!
         $limit: Int!
       ) {
         AddressGroup(
@@ -243,13 +231,14 @@ export class IndexerClient {
           chainId
           registryAddress
           groupId
+          memberCount
         }
       }
     `;
     const data = await this.query<{ AddressGroup: RawAddressGroup[] }>(query, {
       chainId: this.chainId,
       registryAddress: input.registryAddress,
-      groupIds: input.groupIds.map(String),
+      groupIds: input.groupIds,
       limit: input.groupIds.length + 1,
     });
     if (!Array.isArray(data.AddressGroup)) {
@@ -258,28 +247,23 @@ export class IndexerClient {
     return data.AddressGroup;
   }
 
-  private async getMembershipEvents(input: {
+  private async getConfiguredAddressGroupMembers(input: {
     registryAddress: Address;
-    groupIds: bigint[];
-    deploymentBlock: bigint;
-    throughBlock: bigint;
-  }): Promise<RawMembershipEvent[]> {
+    groupIds: GroupId[];
+  }): Promise<RawAddressGroupMember[]> {
     const query = `
-      query AddressGroupMembershipEvents(
+      query ConfiguredAddressGroupMembers(
         $chainId: Int!
         $registryAddress: String!
-        $groupIds: [numeric!]!
-        $deploymentBlock: numeric!
-        $throughBlock: numeric!
+        $groupIds: [String!]!
         $after: String!
         $limit: Int!
       ) {
-        AddressGroupMembershipEvent(
+        AddressGroupMember(
           where: {
             chainId: { _eq: $chainId }
             registryAddress: { _ilike: $registryAddress }
             groupId: { _in: $groupIds }
-            blockNumber: { _gte: $deploymentBlock, _lte: $throughBlock }
             id: { _gt: $after }
           }
           order_by: { id: asc }
@@ -289,35 +273,31 @@ export class IndexerClient {
           chainId
           registryAddress
           groupId
+          groupEntityId
           member
-          present
-          blockNumber
-          logIndex
         }
       }
     `;
 
-    const rows: RawMembershipEvent[] = [];
+    const rows: RawAddressGroupMember[] = [];
     let after = "";
     for (;;) {
-      const data = await this.query<{ AddressGroupMembershipEvent: RawMembershipEvent[] }>(query, {
+      const data = await this.query<{ AddressGroupMember: RawAddressGroupMember[] }>(query, {
         chainId: this.chainId,
         registryAddress: input.registryAddress,
-        groupIds: input.groupIds.map(String),
-        deploymentBlock: input.deploymentBlock.toString(),
-        throughBlock: input.throughBlock.toString(),
+        groupIds: input.groupIds,
         after,
         limit: PAGE_SIZE,
       });
-      const page = data.AddressGroupMembershipEvent;
+      const page = data.AddressGroupMember;
       if (!Array.isArray(page)) {
-        throw new Error("Indexer response omitted AddressGroupMembershipEvent");
+        throw new Error("Indexer response omitted AddressGroupMember");
       }
       rows.push(...page);
       if (page.length < PAGE_SIZE) break;
       const next = page.at(-1)?.id;
       if (!next || next <= after) {
-        throw new Error("Indexer pagination did not advance for AddressGroupMembershipEvent");
+        throw new Error("Indexer pagination did not advance for AddressGroupMember");
       }
       after = next;
     }
@@ -326,7 +306,7 @@ export class IndexerClient {
 
   public async getAddressGroupMembershipSnapshot(input: {
     registryAddress: Address;
-    groupIds: bigint[];
+    groupIds: GroupId[];
     deploymentBlock: bigint;
     snapshotBlock: bigint;
   }): Promise<IndexedMembershipSnapshot> {
@@ -338,26 +318,19 @@ export class IndexerClient {
       throw new Error("Registry deployment block is greater than the requested chain snapshot");
     }
 
-    const indexedThroughBlock = await this.getIndexedThroughBlock();
-    if (indexedThroughBlock < input.snapshotBlock) {
-      throw new Error("Indexer has not processed the requested chain snapshot");
-    }
-
-    const [groups, rawEvents] = await Promise.all([
+    const [groups, rawMembers] = await Promise.all([
       this.getConfiguredAddressGroups({
         registryAddress: input.registryAddress,
         groupIds: uniqueGroupIds,
       }),
-      this.getMembershipEvents({
+      this.getConfiguredAddressGroupMembers({
         registryAddress: input.registryAddress,
         groupIds: uniqueGroupIds,
-        deploymentBlock: input.deploymentBlock,
-        throughBlock: input.snapshotBlock,
       }),
     ]);
 
-    const configuredIds = new Set(uniqueGroupIds.map(String));
-    const indexedGroupIds = new Set<string>();
+    const configuredIds = new Set<GroupId>(uniqueGroupIds);
+    const indexedGroups = new Map<GroupId, RawAddressGroup>();
     if (groups.length > configuredIds.size) {
       throw new Error("Indexer returned an invalid configured group row count");
     }
@@ -366,74 +339,84 @@ export class IndexerClient {
         group.registryAddress,
         "AddressGroup.registryAddress",
       );
-      const groupId = parseUnsignedBigInt(group.groupId, "AddressGroup.groupId");
+      const groupId = normalizeGroupId(group.groupId, "AddressGroup.groupId");
+      const expectedId = `${this.chainId}_${input.registryAddress}_${groupId}`;
       if (
         group.chainId !== this.chainId ||
         registryAddress !== input.registryAddress ||
-        !configuredIds.has(groupId.toString())
+        !configuredIds.has(groupId) ||
+        group.id.toLowerCase() !== expectedId ||
+        !Number.isSafeInteger(group.memberCount) ||
+        group.memberCount < 0
       ) {
         throw new Error("Indexer returned an unexpected address group");
       }
-      indexedGroupIds.add(groupId.toString());
+      indexedGroups.set(groupId, group);
     }
-    if (indexedGroupIds.size !== groups.length) {
+    if (indexedGroups.size !== groups.length) {
       throw new Error("Indexer returned duplicate configured group rows");
     }
     if (
-      indexedGroupIds.size !== configuredIds.size ||
-      [...configuredIds].some((groupId) => !indexedGroupIds.has(groupId))
+      indexedGroups.size !== configuredIds.size ||
+      [...configuredIds].some((groupId) => !indexedGroups.has(groupId))
     ) {
       throw new Error("Indexer has not indexed every configured group from its creation event");
     }
 
+    const membersByGroupId = new Map<GroupId, Set<Address>>(
+      uniqueGroupIds.map((groupId) => [groupId, new Set<Address>()]),
+    );
     const seenIds = new Set<string>();
-    const seenPositions = new Set<string>();
-    const events = rawEvents.map((row): IndexedMembershipEvent => {
+    for (const row of rawMembers) {
       if (!row.id || seenIds.has(row.id)) {
-        throw new Error("Indexer returned a duplicate or invalid membership event id");
+        throw new Error("Indexer returned a duplicate or invalid address-group member id");
       }
       seenIds.add(row.id);
       const registryAddress = normalizeAddress(
         row.registryAddress,
-        "AddressGroupMembershipEvent.registryAddress",
+        "AddressGroupMember.registryAddress",
       );
-      const groupId = parseUnsignedBigInt(row.groupId, "AddressGroupMembershipEvent.groupId");
-      const blockNumber = parseUnsignedBigInt(
-        row.blockNumber,
-        "AddressGroupMembershipEvent.blockNumber",
-      );
-      const logIndex = parseUnsignedBigInt(row.logIndex, "AddressGroupMembershipEvent.logIndex");
+      const groupId = normalizeGroupId(row.groupId, "AddressGroupMember.groupId");
+      const expectedGroupEntityId = `${this.chainId}_${input.registryAddress}_${groupId}`;
       if (
         row.chainId !== this.chainId ||
         registryAddress !== input.registryAddress ||
-        !configuredIds.has(groupId.toString()) ||
-        blockNumber < input.deploymentBlock ||
-        blockNumber > input.snapshotBlock ||
-        typeof row.present !== "boolean"
+        !configuredIds.has(groupId) ||
+        row.groupEntityId.toLowerCase() !== expectedGroupEntityId
       ) {
-        throw new Error("Indexer returned an unexpected membership event");
+        throw new Error("Indexer returned an unexpected address-group member");
       }
-      const position = `${blockNumber}:${logIndex}`;
-      if (seenPositions.has(position)) {
-        throw new Error("Indexer returned duplicate membership event ordering coordinates");
+      const member = normalizeAddress(row.member, "AddressGroupMember.member");
+      const expectedMemberId = `${expectedGroupEntityId}_${member}`;
+      if (row.id.toLowerCase() !== expectedMemberId) {
+        throw new Error("Indexer returned an invalid address-group member id");
       }
-      seenPositions.add(position);
-      return {
-        id: row.id,
-        chainId: row.chainId,
-        registryAddress,
-        groupId,
-        member: normalizeAddress(row.member, "AddressGroupMembershipEvent.member"),
-        present: row.present,
-        blockNumber,
-        logIndex,
-      };
-    });
+      const members = membersByGroupId.get(groupId);
+      if (!members) {
+        throw new Error("Indexer returned a member for an unexpected group");
+      }
+      if (members.has(member)) {
+        throw new Error("Indexer returned duplicate address-group membership");
+      }
+      members.add(member);
+    }
+
+    for (const groupId of uniqueGroupIds) {
+      const indexedCount = indexedGroups.get(groupId)?.memberCount;
+      const enumeratedCount = membersByGroupId.get(groupId)?.size;
+      if (
+        indexedCount === undefined ||
+        enumeratedCount === undefined ||
+        indexedCount !== enumeratedCount
+      ) {
+        throw new Error("Indexer AddressGroup.memberCount does not match AddressGroupMember rows");
+      }
+    }
 
     return {
-      events,
+      membersByGroupId,
       snapshotBlock: input.snapshotBlock,
-      indexedThroughBlock,
+      indexedThroughBlock: input.snapshotBlock,
     };
   }
 
@@ -474,11 +457,4 @@ export class IndexerClient {
       ppTakenPostEarnCutover: BigInt(row.ppTakenPostEarnCutover),
     }));
   }
-}
-
-function parseUnsignedBigInt(value: unknown, label: string): bigint {
-  if (typeof value !== "string" || !/^\d+$/.test(value)) {
-    throw new Error(`Indexer returned invalid ${label}`);
-  }
-  return BigInt(value);
 }
