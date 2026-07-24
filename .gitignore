@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+config/groups.json
+artifacts/
+*.log
+.DS_Store
