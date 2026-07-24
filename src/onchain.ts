@@ -93,6 +93,12 @@ export function assertRegistryGovernance(input: {
     if (!governance?.exists) {
       throw new Error(`Configured group ${group.groupId} does not exist`);
     }
+    if (governance.isPublic) {
+      throw new Error(`Configured group ${group.groupId} permits self-service membership`);
+    }
+    if (governance.pendingCurator !== zeroAddress) {
+      throw new Error(`Configured group ${group.groupId} has a pending curator transfer`);
+    }
     if (input.requireZeroResolver && governance.resolver !== zeroAddress) {
       throw new Error(`Configured group ${group.groupId} has a nonzero resolver`);
     }
