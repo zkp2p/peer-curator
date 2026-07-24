@@ -5,6 +5,7 @@ import {
   emptyTierSets,
   type GroupsConfig,
   normalizeAddress,
+  normalizeGroupId,
   POLICY_SCOPES,
   TIERS,
 } from "../src/domain.js";
@@ -12,6 +13,7 @@ import type { RegistryState } from "../src/onchain.js";
 import { assertPlanSafe, buildReconciliationPlan } from "../src/reconcile.js";
 
 const addr = (digit: string): Address => normalizeAddress(`0x${digit.repeat(40)}`);
+const groupId = (value: number) => normalizeGroupId(`0x${value.toString(16).padStart(64, "0")}`);
 
 function fixtures(): {
   desired: DesiredSnapshot;
@@ -30,7 +32,7 @@ function fixtures(): {
     TIERS.map((tier, tierIndex) => ({
       scope,
       tier,
-      groupId: BigInt(scopeIndex * TIERS.length + tierIndex + 1),
+      groupId: groupId(scopeIndex * TIERS.length + tierIndex + 1),
       minimumMembers: 0,
     })),
   );
@@ -63,7 +65,7 @@ describe("buildReconciliationPlan", () => {
     const c = addr("3");
     desired.policies.get("historical-taker")?.membersByTier.PEER.add(a);
     desired.policies.get("historical-taker")?.membersByTier.PEER.add(b);
-    onchain.membersByGroupId.set(1n, new Set([b, c]));
+    onchain.membersByGroupId.set(groupId(1), new Set([b, c]));
 
     const plan = buildReconciliationPlan({ desired, config, onchain, batchSize: 1 });
     expect(plan.totalAdds).toBe(1);
@@ -93,7 +95,7 @@ describe("assertPlanSafe", () => {
   it("rejects excessive per-group removals", () => {
     const fixture = fixtures();
     const current = new Set([addr("1"), addr("2"), addr("3"), addr("4")]);
-    fixture.onchain.membersByGroupId.set(1n, current);
+    fixture.onchain.membersByGroupId.set(groupId(1), current);
     fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(addr("1"));
     const plan = buildReconciliationPlan({ ...fixture, batchSize: 100 });
     expect(() =>

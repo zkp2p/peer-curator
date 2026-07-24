@@ -66,14 +66,16 @@ pnpm compare:local -- /path/to/group-seeds
 Node 22 local: typecheck, 22 tests, coverage, build
 ```
 
-`pnpm check:upstream` confirms current aggregate/contract compatibility and
-exits nonzero on the not-yet-implemented enriched membership-event schema and
-handler. This is the expected rollout gate until the indexer prerequisite is
-merged. It also reports the known tier forward incompatibility in indexer
-`main`.
+`pnpm check:upstream` confirms the latest contracts bytes32 ABI, current
+membership schema and handler, and the staging registry source binding. It
+currently exits nonzero for two explicit rollout gates: the tier aggregate
+surface is not yet restored on indexer `main`, and production has no nonzero
+registry source binding.
 
-No on-chain plan was run because a production registry deployment and the six
-group IDs are not present in the current contracts deployment registry. The
-membership-event consumer path is covered by mocked GraphQL and replay tests;
-end-to-end parity must be recorded after the indexer surface is deployed and
+No production on-chain plan was run because its registry and six group IDs are
+not deployed. The current-membership consumer path is covered by mocked
+GraphQL tests for group coverage, bytes32 IDs, member enumeration, and
+`memberCount` parity. Snapshot tests cover a stable lagged watermark, indexer
+movement during reads, and insufficient RPC confirmations. Staging end-to-end
+parity is recorded separately after the indexer release is deployed and
 backfilled.

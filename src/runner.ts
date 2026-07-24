@@ -14,6 +14,30 @@ import {
 } from "./reconcile.js";
 import { isBlockedWallet } from "./staticWalletRules.js";
 
+export class IndexerSnapshotAdvancedError extends Error {
+  public constructor() {
+    super("Indexer advanced while the reconciliation snapshot was being read");
+    this.name = "IndexerSnapshotAdvancedError";
+  }
+}
+
+export function assertPinnedIndexerSnapshot(input: {
+  snapshotBlock: bigint;
+  finalIndexedBlock: bigint;
+  rpcLatestBlock: bigint;
+  confirmationBlocks: bigint;
+}): void {
+  if (input.finalIndexedBlock !== input.snapshotBlock) {
+    throw new IndexerSnapshotAdvancedError();
+  }
+  if (
+    input.rpcLatestBlock < input.confirmationBlocks ||
+    input.snapshotBlock > input.rpcLatestBlock - input.confirmationBlocks
+  ) {
+    throw new Error("Indexer snapshot is not sufficiently confirmed by RPC");
+  }
+}
+
 export async function run(
   settings: RuntimeSettings,
   logger: Logger,
@@ -25,6 +49,8 @@ export async function run(
     settings.chainId,
     settings.requestTimeoutMs,
   );
+  const reconciliationRun = settings.command === "plan" || settings.command === "sync";
+  const pinnedIndexerBlock = reconciliationRun ? await indexer.getIndexedThroughBlock() : undefined;
   const desired = await calculateDesiredSnapshot(settings, indexer);
 
   logger.info(
@@ -70,23 +96,27 @@ export async function run(
     chain: base,
     transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
   });
-  const [rpcChainId, rpcLatestBlock] = await Promise.all([
-    publicClient.getChainId(),
-    publicClient.getBlockNumber(),
-  ]);
+  const rpcChainId = await publicClient.getChainId();
   if (rpcChainId !== settings.chainId) {
     throw new Error("RPC chain does not match CHAIN_ID");
   }
-  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
-  if (rpcLatestBlock < confirmationBlocks) {
-    throw new Error("RPC chain height is below SNAPSHOT_CONFIRMATIONS");
+  if (pinnedIndexerBlock === undefined) {
+    throw new Error("Indexer snapshot block is unavailable");
   }
-  const snapshotBlock = rpcLatestBlock - confirmationBlocks;
+  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
   const membership = await indexer.getAddressGroupMembershipSnapshot({
     registryAddress: groups.registryAddress,
     groupIds: groups.groups.map((group) => group.groupId),
     deploymentBlock: groups.registryDeploymentBlock,
-    snapshotBlock,
+    snapshotBlock: pinnedIndexerBlock,
+  });
+  const finalIndexerBlock = await indexer.getIndexedThroughBlock();
+  const rpcLatestBlock = await publicClient.getBlockNumber();
+  assertPinnedIndexerSnapshot({
+    snapshotBlock: pinnedIndexerBlock,
+    finalIndexedBlock: finalIndexerBlock,
+    rpcLatestBlock,
+    confirmationBlocks,
   });
   const onchain = await loadRegistryState(publicClient, groups, membership);
   const account = settings.execute
@@ -156,4 +186,30 @@ export async function run(
     { transactionCount: transactionHashes.length, transactionHashes },
     "On-chain group reconciliation completed",
   );
+}
+
+export async function runWithSnapshotRetries(
+  settings: RuntimeSettings,
+  logger: Logger,
+  verifyAddress?: string,
+  operation: typeof run = run,
+): Promise<void> {
+  for (let attempt = 1; attempt <= settings.snapshotMaxAttempts; attempt += 1) {
+    try {
+      await operation(settings, logger, verifyAddress);
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof IndexerSnapshotAdvancedError) ||
+        attempt === settings.snapshotMaxAttempts
+      ) {
+        throw error;
+      }
+      logger.warn(
+        { attempt, maxAttempts: settings.snapshotMaxAttempts },
+        "Indexer advanced during snapshot; retrying the read-only reconciliation phase",
+      );
+      await new Promise((resolve) => setTimeout(resolve, settings.snapshotRetryDelayMs));
+    }
+  }
 }

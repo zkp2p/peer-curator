@@ -1,49 +1,45 @@
 # Producer compatibility
 
-Baseline captured on 2026-07-24.
+Baseline reviewed on 2026-07-24.
 
-| Producer | Ref/commit | Surface | Status | Evidence |
-|---|---|---|---|---|
-| Contracts | `origin/main` / `764a125d7a859184127a36c44de3beaf5611c0d5` | `AddressGroupRegistry` reads, writes, events | Compatible | `addMembers`, `removeMembers`, `getGroup`, `MemberAdded`, and `MemberRemoved` match the embedded minimal ABI. |
-| Indexer production | `origin/releases/prod` / `6aad2038e6d45d9c3202725eafb149554a3dff25` | Legacy taker and frozen Earn aggregates | Compatible | Production exposes `TakerStats.lockScore`, `MakerPlatformStats.totalAmountTakenPreEarnCutover`, and `MakerPeerPayStats.ppTakenPostEarnCutover`. |
-| Indexer main | `origin/main` / `9bc2e14586b6275dd14e4b2d4e4d6262fd582691` | Legacy taker and frozen Earn aggregates | **High-severity forward incompatibility** | Main intentionally removed all three retired policy fields/entities. The runtime query will fail closed; no transaction will be sent. |
-| Indexer main | `origin/main` / `9bc2e14586b6275dd14e4b2d4e4d6262fd582691` | Address-group domain projection and raw registry events | Partially compatible | `AddressGroup`, `AddressGroupMember`, and raw registry add/remove audit rows exist. Production binding is still addressless. |
-| Indexer required surface | planned | Enriched append-only `AddressGroupMembershipEvent` | **Required before plan/sync** | The consumer requires explicit chain, registry, group, member, presence, block, and log fields. Raw audit rows are deliberately not parsed. |
-| Curator history | pre-Earn tier implementation and 2026-07-24 production snapshot | Tier policy and blocked wallets | Provenance only | This repository owns the preserved formulas and the hashed blocked-wallet snapshot. There is no Curator runtime dependency. |
+| Producer | Surface | Requirement |
+|---|---|---|
+| Contracts `origin/main` (`ce038e6c`) | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
+| Indexer tier aggregates | `TakerStats`, `MakerPlatformStats`, `MakerPeerPayStats` | preserved lock-score and frozen Earn fields used by the two policies |
+| Indexer current membership | `AddressGroup`, `AddressGroupMember` | all six groups enumerable, with `memberCount` equal to the matching member rows |
+| Indexer synchronization | `chain_metadata` | one valid processed-block watermark for chain 8453 |
+| Indexer environment config | `AddressGroupRegistry` source | a nonzero registry address bound in the matching environment |
+| Curator history | tier policy and blocked wallets | provenance only; there is no runtime Curator dependency |
 
-`calculate` and `verify` are compatible with production today. `plan` and
-`sync` additionally require the enriched membership-event projection, a
-registry source configured from its deployment block, and a complete backfill.
-They fail closed until those prerequisites are present.
-
-Before promoting the current indexer `main`, choose one of:
-
-1. Retain the four aggregate fields/entities as a supported operational
-   surface.
-2. Add a replacement indexer query with equivalent frozen-volume and
-   lock-score semantics.
-3. Migrate this service to an audited snapshot plus raw-event reconstruction.
-
-Do not silently drop lock-score penalties, change the frozen Earn volume
-formula, or refresh the blocked-wallet hashes without reviewed provenance.
+`pnpm check:upstream` inspects the fetched sibling repositories. Any missing
+runtime field, membership projection, handler mutation, bytes32 ABI surface, or
+environment registry binding is incompatible and makes the command exit
+nonzero. Production intentionally remains incompatible until its registry is
+deployed and bound.
 
 ## Membership consistency contract
 
-The reconciler fixes a confirmed Base RPC block before querying membership.
-The indexer must satisfy all of the following:
+For `plan` and `sync`, the reconciler:
 
-- `chain_metadata.latest_processed_block` is at least the fixed block.
-- Every configured group has an `AddressGroup` row produced by its
-  `GroupCreated` event.
-- `AddressGroupMembershipEvent` contains every add/remove event from the
-  registry deployment block through the fixed block.
-- Every event includes first-class `chainId`, `registryAddress`, `groupId`,
-  `member`, `present`, `blockNumber`, and `logIndex`.
-- The configured registry source started no later than its deployment block.
+- captures `chain_metadata.latest_processed_block` before reading any desired
+  aggregate or membership row;
+- enumerates `AddressGroupMember` for exactly the configured chain, registry,
+  and bytes32 group IDs;
+- requires every `AddressGroup` row and verifies `memberCount` parity;
+- rereads the watermark after all indexer queries and requires an exact match;
+- requires the stable watermark to be at least `SNAPSHOT_CONFIRMATIONS` behind
+  the RPC head;
+- reads bytecode and `getGroup` at that exact watermark.
 
-RPC remains the source for bytecode, pinned `getGroup` governance reads,
-simulation, writes, and receipts. It is no longer used to scan event logs.
+This accepts an indexer that is behind the RPC head; it never demands that the
+indexer reach a block derived from the latest RPC tip. It also avoids using an
+unconfirmed latest indexer state. Envio/Hasura does not expose historical
+queries for mutable domain entities, so a changing watermark fails closed and
+the next scheduled run retries from a new stable state.
 
-Run `pnpm check:upstream` after fetching the sibling repositories. Runtime
-surface or membership-prerequisite incompatibility exits nonzero; known tier
-forward drift is reported separately.
+RPC remains the source for pinned contract governance, simulation, writes, and
+receipts. It is not used to enumerate members or scan logs.
+
+Do not silently drop lock-score penalties, change the frozen Earn volume
+formula, accept decimal group IDs, or refresh blocked-wallet hashes without
+reviewed provenance.

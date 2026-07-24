@@ -1,4 +1,4 @@
-import { type Address, isAddress } from "viem";
+import { type Address, type Hex, isAddress } from "viem";
 
 export const TIERS = ["PEER", "PLUS", "PRO"] as const;
 export type Tier = (typeof TIERS)[number];
@@ -7,11 +7,12 @@ export const POLICY_SCOPES = ["historical-taker", "current-earn"] as const;
 export type PolicyScope = (typeof POLICY_SCOPES)[number];
 
 export type GroupKey = `${PolicyScope}:${Tier}`;
+export type GroupId = Hex;
 
 export interface GroupDefinition {
   scope: PolicyScope;
   tier: Tier;
-  groupId: bigint;
+  groupId: GroupId;
   minimumMembers: number;
 }
 
@@ -57,6 +58,14 @@ export function normalizeAddress(value: string, field = "address"): Address {
     throw new Error(`Invalid ${field}`);
   }
   return normalized as Address;
+}
+
+export function normalizeGroupId(value: string, field = "groupId"): GroupId {
+  const normalized = value.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(`Invalid ${field}`);
+  }
+  return normalized as GroupId;
 }
 
 export function tierCounts(snapshot: PolicySnapshot): Record<Tier, number> {

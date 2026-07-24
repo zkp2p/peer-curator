@@ -6,6 +6,7 @@ import {
   type GroupsConfig,
   groupKey,
   normalizeAddress,
+  normalizeGroupId,
   POLICY_SCOPES,
   type PolicyScope,
   TIERS,
@@ -69,7 +70,9 @@ const envSchema = z.object({
     .transform((value) => value === "true"),
   ALLOW_INITIAL_SEED: booleanFromString,
   BATCH_SIZE: positiveInteger("100"),
-  SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("20"),
+  SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("0"),
+  SNAPSHOT_MAX_ATTEMPTS: positiveInteger("20"),
+  SNAPSHOT_RETRY_DELAY_MS: nonNegativeInteger("250"),
   MAX_TOTAL_ADDS: nonNegativeInteger("3000"),
   MAX_TOTAL_REMOVALS: nonNegativeInteger("100"),
   MAX_REMOVAL_BPS_PER_GROUP: nonNegativeInteger("500"),
@@ -86,7 +89,7 @@ const groupFileSchema = z.object({
       z.object({
         scope: z.enum(POLICY_SCOPES),
         tier: z.enum(TIERS),
-        groupId: z.string().regex(/^[1-9]\d*$/),
+        groupId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
         minimumMembers: z.number().int().nonnegative(),
       }),
     )
@@ -108,6 +111,8 @@ export interface RuntimeSettings {
   allowInitialSeed: boolean;
   batchSize: number;
   snapshotConfirmations: number;
+  snapshotMaxAttempts: number;
+  snapshotRetryDelayMs: number;
   maxTotalAdds: number;
   maxTotalRemovals: number;
   maxRemovalBpsPerGroup: number;
@@ -121,7 +126,7 @@ function validateGroupCoverage(groups: GroupsConfig): void {
     throw new Error("Group configuration contains duplicate scope/tier entries");
   }
 
-  const ids = new Set(groups.groups.map((group) => group.groupId.toString()));
+  const ids = new Set(groups.groups.map((group) => group.groupId));
   if (ids.size !== groups.groups.length) {
     throw new Error("Group configuration reuses a groupId");
   }
@@ -148,7 +153,7 @@ async function readGroupsConfig(
     groups: parsed.groups.map((group) => ({
       scope: group.scope as PolicyScope,
       tier: group.tier as Tier,
-      groupId: BigInt(group.groupId),
+      groupId: normalizeGroupId(group.groupId),
       minimumMembers: group.minimumMembers,
     })),
   };
@@ -195,6 +200,8 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     allowInitialSeed: env.ALLOW_INITIAL_SEED,
     batchSize: env.BATCH_SIZE,
     snapshotConfirmations: env.SNAPSHOT_CONFIRMATIONS,
+    snapshotMaxAttempts: env.SNAPSHOT_MAX_ATTEMPTS,
+    snapshotRetryDelayMs: env.SNAPSHOT_RETRY_DELAY_MS,
     maxTotalAdds: env.MAX_TOTAL_ADDS,
     maxTotalRemovals: env.MAX_TOTAL_REMOVALS,
     maxRemovalBpsPerGroup: env.MAX_REMOVAL_BPS_PER_GROUP,

@@ -8,8 +8,9 @@ Calculates and maintains two three-tier, exact-membership policy families in
 
 The service pulls production indexer aggregates, excludes wallets whose
 address hashes are in the committed denylist, calculates desired membership,
-reconstructs current registry membership from indexer-provided events, and
-submits the minimal add/remove transaction batches.
+reads current registry membership from the indexer's canonical
+`AddressGroupMember` projection, and submits the minimal add/remove transaction
+batches.
 
 ## High-level tiers
 
@@ -58,14 +59,17 @@ JSON source file to sorted hashes without printing the source wallets.
 ## Safety model
 
 - Exact-tier groups: a member belongs to one tier per policy family.
-- Current on-chain state comes from replaying indexed `MemberAdded` and
-  `MemberRemoved` events through a fixed, confirmed Base block.
-- The indexer's processed-block watermark must cover that fixed block, and all
-  configured `GroupCreated` projections must exist.
+- Current curated state comes from `AddressGroup` and `AddressGroupMember`.
+- The indexer watermark is captured before any aggregate or membership read and
+  must remain unchanged through the final read.
+- That watermark must be at least `SNAPSHOT_CONFIRMATIONS` behind the RPC head;
+  a fresh, unconfirmed indexer tip is never used.
+- Every configured group must exist, and its indexed `memberCount` must equal
+  the enumerated member rows.
 - Indexer or RPC failures stop the run.
 - Missing GraphQL fields stop the run.
 - Nonexistent groups, unexpected resolvers, or a signer that is not the group
-  owner stop execution.
+  curator stop execution.
 - Adds are simulated and mined before any removals.
 - Global add/remove limits, per-group removal percentages, minimum group sizes,
   and an initial-seed gate bound every run.
@@ -113,8 +117,8 @@ pnpm calculate
 
 For `plan` or `sync`, copy `config/groups.example.json` to the untracked
 `config/groups.json`, then set the real registry address, deployment block,
-and six group IDs. Group names are event-only in the contract, so this file
-is the durable `(chainId, registryAddress, groupId)` manifest.
+and six bytes32 group IDs. Group names are event-only in the contract, so this
+file is the durable `(chainId, registryAddress, groupId)` manifest.
 
 Runtime credentials:
 
@@ -122,11 +126,12 @@ Runtime credentials:
 - `RPC_URL` — required for `plan` and `sync`.
 - `GROUP_ADMIN_PRIVATE_KEY` — required only for execution.
 
-`SNAPSHOT_CONFIRMATIONS` controls how far behind the RPC tip membership and
-governance are pinned. The default 20-block buffer tolerates ordinary indexer
-lag and reduces tip-reorg risk.
+`SNAPSHOT_CONFIRMATIONS` is the minimum RPC confirmation depth required for
+the indexer's stable processed-block watermark. The reconciler uses that
+watermark as the snapshot; it does not require the indexer to catch up to the
+RPC head.
 
-The private key must resolve to the owner returned by `getGroup` for every
+The private key must resolve to the curator returned by `getGroup` for every
 configured group.
 
 ## Commands
@@ -142,34 +147,31 @@ pnpm check
 pnpm check:upstream
 ```
 
-## Indexer-backed membership reconstruction
+## Indexer-backed current membership
 
 `AddressGroupRegistry.members(groupId, wallet)` answers whether one known
-wallet is a member, but the contract does not expose a function that lists
-every member. A reconciler needs that full current set so it can remove stale
-wallets as well as add missing ones.
+wallet is curated, but the contract does not enumerate all members. The
+indexer's `AddressGroupMember` entity is that canonical enumerable current
+set; a row is created on `MemberAdded` and deleted on `MemberRemoved`.
 
-The service fixes a confirmed RPC block number (`SNAPSHOT_CONFIRMATIONS`
-defaults to 20), requires
-`chain_metadata.latest_processed_block` to cover it, then reads every
-`AddressGroupMembershipEvent` for the configured registry and groups between
-the registry deployment block and that fixed block. It sorts those indexed
-events by block and log position and applies them in order:
+For `plan` and `sync`, the service:
 
-```text
-MemberAdded(group, wallet)   -> add wallet to the local set
-MemberRemoved(group, wallet) -> remove wallet from the local set
-```
+1. Captures `chain_metadata.latest_processed_block`.
+2. Reads all desired-tier aggregates, the six `AddressGroup` rows, and every
+   matching `AddressGroupMember` row.
+3. Reads the watermark again and requires it to be unchanged, preventing a
+   reconciliation across two indexer states as far as the Envio/Hasura query
+   surface allows.
+4. Requires the pinned watermark not to be ahead of the RPC head. A nonzero
+   `SNAPSHOT_CONFIRMATIONS` can additionally require an indexer deployment
+   that deliberately trails the chain; continuously synced deployments should
+   leave it at `0`.
+5. Reads bytecode and `getGroup` governance at that exact block.
 
-The resulting set is the current on-chain membership reconstructed from the
-chain's append-only history. The indexer's `AddressGroup` projection proves
-each group creation was indexed. Pinned `getGroup` reads separately verify
-that each configured group exists and has the expected governance.
-
-The indexer surface is a hard dependency for `plan` and `sync`. The reconciler
-does not fall back to RPC log scanning: a missing event entity, incomplete
-group backfill, or stale processing watermark stops the run before a
-transaction can be built.
+The indexer surface is a hard dependency. Missing group rows, a member-count
+mismatch, a changed watermark, insufficient confirmations, or an unavailable
+field stops the run before a transaction can be built. There is no RPC-log
+fallback.
 
 Recommended rollout:
 
@@ -184,22 +186,42 @@ Recommended rollout:
 
 ## Cron deployment
 
-The Docker image executes one `sync` run and exits. `railway.json` configures
-one run every 24 hours at midnight UTC:
+The Docker image executes one command and exits. `RUN_COMMAND` selects
+`calculate`, `verify`, `plan`, or `sync`; it defaults to `calculate`.
+`railway.json` configures one run every 12 hours, at midnight and noon UTC:
 
 ```text
-0 0 * * *
+0 */12 * * *
 ```
 
-Keep `EXECUTE=false` until staging validation and an explicit production
-approval. Railway secret setup and production deployment are separate
-operations; this repository does not create or rotate secrets.
+If the indexer advances while the desired aggregates and group membership are
+being read, the run remains fail-closed and retries the read-only snapshot
+phase up to `SNAPSHOT_MAX_ATTEMPTS` times. `SNAPSHOT_RETRY_DELAY_MS` controls
+the delay between attempts. Transactions are considered only after one
+unchanged, sufficiently confirmed snapshot has been captured.
+
+New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
+This mode needs only the indexer and can run before the registry groups,
+membership projection, and group-curator signer are ready.
+
+After all six group IDs are recorded and the membership projection is
+deployed and backfilled, move through `plan` before selecting `sync`. Keep
+`EXECUTE=false` until the generated plan is approved; `sync` only sends
+transactions when `EXECUTE=true`.
+
+The hosted environments are:
+
+- `staging` — staging indexer and registry/group manifest.
+- `production` — production indexer and registry/group manifest.
+
+Each environment must use its matching indexer, registry deployment, group
+IDs, and signer. Never point one environment at the other environment's
+contracts or indexer.
 
 ## Known upstream drift
 
-The current production indexer supports the exact preserved formulas. Latest
-indexer `main` has intentionally removed their aggregate fields. See
-[docs/compatibility.md](docs/compatibility.md). The service fails closed if
-that incompatible schema reaches its configured endpoint. `plan` and `sync`
-also remain gated until the enriched membership-event entity is deployed and
-backfilled.
+The service requires the preserved tier aggregates plus `AddressGroup`,
+`AddressGroupMember`, `chain_metadata`, and an environment-specific nonzero
+registry binding. See [docs/compatibility.md](docs/compatibility.md).
+`pnpm check:upstream` fails if a required contract, schema, handler, or source
+binding is absent.

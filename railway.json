@@ -5,8 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "node dist/cli.js sync",
-    "cronSchedule": "0 0 * * *",
+    "startCommand": "node dist/cli.js",
+    "cronSchedule": "0 */12 * * *",
     "restartPolicyType": "NEVER"
   }
 }

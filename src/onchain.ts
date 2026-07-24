@@ -9,62 +9,29 @@ import type {
 import { zeroAddress } from "viem";
 import { base } from "viem/chains";
 import { addressGroupRegistryAbi } from "./contracts.js";
-import { type GroupsConfig, normalizeAddress } from "./domain.js";
+import { type GroupId, type GroupsConfig, normalizeAddress } from "./domain.js";
 import type { IndexedMembershipSnapshot } from "./indexer.js";
 
-export interface MembershipEvent {
-  groupId: bigint;
-  member: Address;
-  present: boolean;
-  blockNumber: bigint;
-  logIndex: bigint;
-}
-
 export interface GroupGovernance {
-  groupId: bigint;
-  owner: Address;
-  pendingOwner: Address;
+  groupId: GroupId;
+  curator: Address;
+  pendingCurator: Address;
   resolver: Address;
+  isPublic: boolean;
   exists: boolean;
 }
 
 export interface RegistryState {
-  membersByGroupId: Map<bigint, Set<Address>>;
-  governanceByGroupId: Map<bigint, GroupGovernance>;
+  membersByGroupId: Map<GroupId, Set<Address>>;
+  governanceByGroupId: Map<GroupId, GroupGovernance>;
   snapshotBlock: bigint;
   indexedThroughBlock: bigint;
 }
 
 export interface GroupMutation {
   operation: "add" | "remove";
-  groupId: bigint;
+  groupId: GroupId;
   members: Address[];
-}
-
-export function replayMembershipEvents(
-  events: MembershipEvent[],
-  groupIds: Iterable<bigint>,
-): Map<bigint, Set<Address>> {
-  const state = new Map<bigint, Set<Address>>();
-  for (const groupId of groupIds) state.set(groupId, new Set<Address>());
-
-  const ordered = [...events].sort((left, right) => {
-    if (left.blockNumber !== right.blockNumber) {
-      return left.blockNumber < right.blockNumber ? -1 : 1;
-    }
-    if (left.logIndex === right.logIndex) return 0;
-    return left.logIndex < right.logIndex ? -1 : 1;
-  });
-
-  for (const event of ordered) {
-    const members = state.get(event.groupId);
-    if (!members) {
-      throw new Error("Membership history contains an unexpected group");
-    }
-    if (event.present) members.add(event.member);
-    else members.delete(event.member);
-  }
-  return state;
 }
 
 export async function loadRegistryState<transport extends Transport>(
@@ -89,7 +56,7 @@ export async function loadRegistryState<transport extends Transport>(
   const uniqueGroupIds = [...new Set(config.groups.map((group) => group.groupId))];
   const governanceRows = await Promise.all(
     uniqueGroupIds.map(async (groupId): Promise<GroupGovernance> => {
-      const [owner, pendingOwner, resolver, exists] = await client.readContract({
+      const [curator, pendingCurator, resolver, isPublic, exists] = await client.readContract({
         address: config.registryAddress,
         abi: addressGroupRegistryAbi,
         functionName: "getGroup",
@@ -98,16 +65,17 @@ export async function loadRegistryState<transport extends Transport>(
       });
       return {
         groupId,
-        owner: normalizeAddress(owner),
-        pendingOwner: normalizeAddress(pendingOwner),
+        curator: normalizeAddress(curator),
+        pendingCurator: normalizeAddress(pendingCurator),
         resolver: normalizeAddress(resolver),
+        isPublic,
         exists,
       };
     }),
   );
 
   return {
-    membersByGroupId: replayMembershipEvents(membership.events, uniqueGroupIds),
+    membersByGroupId: membership.membersByGroupId,
     governanceByGroupId: new Map(governanceRows.map((row) => [row.groupId, row])),
     snapshotBlock: membership.snapshotBlock,
     indexedThroughBlock: membership.indexedThroughBlock,
@@ -125,11 +93,17 @@ export function assertRegistryGovernance(input: {
     if (!governance?.exists) {
       throw new Error(`Configured group ${group.groupId} does not exist`);
     }
+    if (governance.isPublic) {
+      throw new Error(`Configured group ${group.groupId} permits self-service membership`);
+    }
+    if (governance.pendingCurator !== zeroAddress) {
+      throw new Error(`Configured group ${group.groupId} has a pending curator transfer`);
+    }
     if (input.requireZeroResolver && governance.resolver !== zeroAddress) {
       throw new Error(`Configured group ${group.groupId} has a nonzero resolver`);
     }
-    if (input.signer && governance.owner.toLowerCase() !== input.signer.address.toLowerCase()) {
-      throw new Error(`Signer is not the owner of configured group ${group.groupId}`);
+    if (input.signer && governance.curator.toLowerCase() !== input.signer.address.toLowerCase()) {
+      throw new Error(`Signer is not the curator of configured group ${group.groupId}`);
     }
   }
 }
