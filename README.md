@@ -162,8 +162,10 @@ For `plan` and `sync`, the service:
 3. Reads the watermark again and requires it to be unchanged, preventing a
    reconciliation across two indexer states as far as the Envio/Hasura query
    surface allows.
-4. Requires the pinned watermark to be at least
-   `SNAPSHOT_CONFIRMATIONS` behind the RPC head.
+4. Requires the pinned watermark not to be ahead of the RPC head. A nonzero
+   `SNAPSHOT_CONFIRMATIONS` can additionally require an indexer deployment
+   that deliberately trails the chain; continuously synced deployments should
+   leave it at `0`.
 5. Reads bytecode and `getGroup` governance at that exact block.
 
 The indexer surface is a hard dependency. Missing group rows, a member-count
@@ -186,11 +188,17 @@ Recommended rollout:
 
 The Docker image executes one command and exits. `RUN_COMMAND` selects
 `calculate`, `verify`, `plan`, or `sync`; it defaults to `calculate`.
-`railway.json` configures one run every 24 hours at midnight UTC:
+`railway.json` configures one run every 12 hours, at midnight and noon UTC:
 
 ```text
-0 0 * * *
+0 */12 * * *
 ```
+
+If the indexer advances while the desired aggregates and group membership are
+being read, the run remains fail-closed and retries the read-only snapshot
+phase up to `SNAPSHOT_MAX_ATTEMPTS` times. `SNAPSHOT_RETRY_DELAY_MS` controls
+the delay between attempts. Transactions are considered only after one
+unchanged, sufficiently confirmed snapshot has been captured.
 
 New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
 This mode needs only the indexer and can run before the registry groups,

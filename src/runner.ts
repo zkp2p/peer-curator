@@ -14,6 +14,13 @@ import {
 } from "./reconcile.js";
 import { isBlockedWallet } from "./staticWalletRules.js";
 
+export class IndexerSnapshotAdvancedError extends Error {
+  public constructor() {
+    super("Indexer advanced while the reconciliation snapshot was being read");
+    this.name = "IndexerSnapshotAdvancedError";
+  }
+}
+
 export function assertPinnedIndexerSnapshot(input: {
   snapshotBlock: bigint;
   finalIndexedBlock: bigint;
@@ -21,7 +28,7 @@ export function assertPinnedIndexerSnapshot(input: {
   confirmationBlocks: bigint;
 }): void {
   if (input.finalIndexedBlock !== input.snapshotBlock) {
-    throw new Error("Indexer advanced while the reconciliation snapshot was being read");
+    throw new IndexerSnapshotAdvancedError();
   }
   if (
     input.rpcLatestBlock < input.confirmationBlocks ||
@@ -179,4 +186,30 @@ export async function run(
     { transactionCount: transactionHashes.length, transactionHashes },
     "On-chain group reconciliation completed",
   );
+}
+
+export async function runWithSnapshotRetries(
+  settings: RuntimeSettings,
+  logger: Logger,
+  verifyAddress?: string,
+  operation: typeof run = run,
+): Promise<void> {
+  for (let attempt = 1; attempt <= settings.snapshotMaxAttempts; attempt += 1) {
+    try {
+      await operation(settings, logger, verifyAddress);
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof IndexerSnapshotAdvancedError) ||
+        attempt === settings.snapshotMaxAttempts
+      ) {
+        throw error;
+      }
+      logger.warn(
+        { attempt, maxAttempts: settings.snapshotMaxAttempts },
+        "Indexer advanced during snapshot; retrying the read-only reconciliation phase",
+      );
+      await new Promise((resolve) => setTimeout(resolve, settings.snapshotRetryDelayMs));
+    }
+  }
 }

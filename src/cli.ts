@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { loadSettings } from "./config.js";
 import { createLogger } from "./logger.js";
-import { run } from "./runner.js";
+import { runWithSnapshotRetries } from "./runner.js";
 
 const command = z
   .enum(["calculate", "verify", "plan", "sync"])
@@ -13,7 +13,7 @@ const logger = createLogger(settings.logLevel);
 
 try {
   const verifyAddress = process.argv.slice(3).find((argument) => argument !== "--");
-  await run(settings, logger, verifyAddress);
+  await runWithSnapshotRetries(settings, logger, verifyAddress);
 } catch (error) {
   logger.fatal(
     {

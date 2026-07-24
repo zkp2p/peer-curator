@@ -70,7 +70,9 @@ const envSchema = z.object({
     .transform((value) => value === "true"),
   ALLOW_INITIAL_SEED: booleanFromString,
   BATCH_SIZE: positiveInteger("100"),
-  SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("20"),
+  SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("0"),
+  SNAPSHOT_MAX_ATTEMPTS: positiveInteger("20"),
+  SNAPSHOT_RETRY_DELAY_MS: nonNegativeInteger("250"),
   MAX_TOTAL_ADDS: nonNegativeInteger("3000"),
   MAX_TOTAL_REMOVALS: nonNegativeInteger("100"),
   MAX_REMOVAL_BPS_PER_GROUP: nonNegativeInteger("500"),
@@ -109,6 +111,8 @@ export interface RuntimeSettings {
   allowInitialSeed: boolean;
   batchSize: number;
   snapshotConfirmations: number;
+  snapshotMaxAttempts: number;
+  snapshotRetryDelayMs: number;
   maxTotalAdds: number;
   maxTotalRemovals: number;
   maxRemovalBpsPerGroup: number;
@@ -196,6 +200,8 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     allowInitialSeed: env.ALLOW_INITIAL_SEED,
     batchSize: env.BATCH_SIZE,
     snapshotConfirmations: env.SNAPSHOT_CONFIRMATIONS,
+    snapshotMaxAttempts: env.SNAPSHOT_MAX_ATTEMPTS,
+    snapshotRetryDelayMs: env.SNAPSHOT_RETRY_DELAY_MS,
     maxTotalAdds: env.MAX_TOTAL_ADDS,
     maxTotalRemovals: env.MAX_TOTAL_REMOVALS,
     maxRemovalBpsPerGroup: env.MAX_REMOVAL_BPS_PER_GROUP,
