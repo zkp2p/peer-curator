@@ -184,16 +184,31 @@ Recommended rollout:
 
 ## Cron deployment
 
-The Docker image executes one `sync` run and exits. `railway.json` configures
-one run every 24 hours at midnight UTC:
+The Docker image executes one command and exits. `RUN_COMMAND` selects
+`calculate`, `verify`, `plan`, or `sync`; it defaults to `calculate`.
+`railway.json` configures one run every 24 hours at midnight UTC:
 
 ```text
 0 0 * * *
 ```
 
-Keep `EXECUTE=false` until staging validation and an explicit production
-approval. Railway secret setup and production deployment are separate
-operations; this repository does not create or rotate secrets.
+New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
+This mode needs only the indexer and can run before the registry groups,
+membership-event projection, and group-owner signer are ready.
+
+After all six group IDs are recorded and the membership projection is
+deployed and backfilled, move through `plan` before selecting `sync`. Keep
+`EXECUTE=false` until the generated plan is approved; `sync` only sends
+transactions when `EXECUTE=true`.
+
+The hosted environments are:
+
+- `staging` — staging indexer and registry/group manifest.
+- `production` — production indexer and registry/group manifest.
+
+Each environment must use its matching indexer, registry deployment, group
+IDs, and signer. Never point one environment at the other environment's
+contracts or indexer.
 
 ## Known upstream drift
 
