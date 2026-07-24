@@ -49,10 +49,10 @@ describe("classifyTier", () => {
 });
 
 describe("historical taker policy", () => {
-  it("applies blocklist precedence and folds top-tier overrides into Pro", () => {
+  it("applies blocklist precedence and folds the natural top band into Pro", () => {
     const peer = address("1");
     const blocked = address("2");
-    const override = address("3");
+    const pro = address("3");
     const snapshot = calculateHistoricalTakerPolicy({
       takerStats: [
         {
@@ -68,18 +68,17 @@ describe("historical taker policy", () => {
           lockScore: 0n,
         },
         {
-          id: `8453_${override}`,
-          owner: override,
-          totalFulfilledVolume: 1n,
+          id: `8453_${pro}`,
+          owner: pro,
+          totalFulfilledVolume: 25_000_000_000n,
           lockScore: 0n,
         },
       ],
       isBlockedWallet: (candidate) => candidate === blocked,
-      isTopTierOverride: (candidate) => candidate === override,
     });
 
     expect(snapshot.membersByTier.PEER).toEqual(new Set([peer]));
-    expect(snapshot.membersByTier.PRO).toEqual(new Set([override]));
+    expect(snapshot.membersByTier.PRO).toEqual(new Set([pro]));
     expect([...Object.values(snapshot.membersByTier).flatMap((set) => [...set])]).not.toContain(
       blocked,
     );

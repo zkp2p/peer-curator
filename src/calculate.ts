@@ -2,11 +2,7 @@ import type { RuntimeSettings } from "./config.js";
 import type { DesiredSnapshot } from "./domain.js";
 import { IndexerClient } from "./indexer.js";
 import { calculateCurrentEarnPolicy, calculateHistoricalTakerPolicy } from "./policies.js";
-import {
-  BLOCKED_WALLET_HASHES,
-  isBlockedWallet,
-  isHistoricalTopTierOverride,
-} from "./staticWalletRules.js";
+import { BLOCKED_WALLET_HASHES, isBlockedWallet } from "./staticWalletRules.js";
 
 export async function calculateDesiredSnapshot(
   settings: RuntimeSettings,
@@ -27,7 +23,6 @@ export async function calculateDesiredSnapshot(
   const historical = calculateHistoricalTakerPolicy({
     takerStats,
     isBlockedWallet,
-    isTopTierOverride: isHistoricalTopTierOverride,
   });
   const earn = calculateCurrentEarnPolicy({
     platformStats,

@@ -8,7 +8,7 @@ Inputs:
 
 - Production indexer through both authenticated and public access paths.
 - Twenty-five committed blocked-wallet hashes; no Curator/database request.
-- Three committed legacy top-tier override hashes, folded into Pro.
+- No address-specific tier overrides.
 
 Results:
 

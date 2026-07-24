@@ -35,10 +35,9 @@ sum(MakerPlatformStats.totalAmountTakenPreEarnCutover)
 
 Both policies dilute `lockScore` by
 `max(TakerStats.totalFulfilledVolume, 250 USDC)` and demote one tier per crossed
-threshold. The former President override set is also committed as address
-hashes; all three entries map to Pro. The preserved legacy calculation has an
-additional internal top band so lock-score demotions remain faithful, but that
-band is folded into the public Pro group.
+threshold. The preserved legacy calculation has an additional internal top
+band so lock-score demotions remain faithful, but that band is folded into the
+public Pro group. There are no address-specific tier overrides.
 
 ## Static blocked-wallet snapshot
 

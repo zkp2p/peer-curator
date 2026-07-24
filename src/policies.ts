@@ -78,7 +78,6 @@ function assertExclusive(snapshot: PolicySnapshot): void {
 export function calculateHistoricalTakerPolicy(input: {
   takerStats: TakerStatsRow[];
   isBlockedWallet: (address: Address) => boolean;
-  isTopTierOverride: (address: Address) => boolean;
 }): PolicySnapshot {
   const snapshot: PolicySnapshot = {
     scope: HISTORICAL_TAKER_POLICY.scope,
@@ -88,14 +87,12 @@ export function calculateHistoricalTakerPolicy(input: {
 
   for (const row of input.takerStats) {
     if (input.isBlockedWallet(row.owner)) continue;
-    const tier = input.isTopTierOverride(row.owner)
-      ? "TOP"
-      : classifyTier(
-          row.totalFulfilledVolume,
-          row.lockScore,
-          row.totalFulfilledVolume,
-          HISTORICAL_TAKER_POLICY,
-        );
+    const tier = classifyTier(
+      row.totalFulfilledVolume,
+      row.lockScore,
+      row.totalFulfilledVolume,
+      HISTORICAL_TAKER_POLICY,
+    );
     addMember(snapshot, tier, row.owner);
   }
 
