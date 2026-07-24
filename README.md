@@ -179,7 +179,7 @@ one run every 24 hours at midnight UTC:
 ```
 
 Keep `EXECUTE=false` until staging validation and an explicit production
-approval. Railway/Infisical setup and production deployment are separate
+approval. Railway secret setup and production deployment are separate
 operations; this repository does not create or rotate secrets.
 
 ## Known upstream drift

@@ -61,7 +61,7 @@ pnpm check:upstream
 pnpm calculate
 pnpm verify -- 0x...
 pnpm compare:local -- /path/to/group-seeds
-Node 22 CI: typecheck, 14 tests, build
+Node 22 CI: typecheck, 16 tests, build
 ```
 
 `pnpm check:upstream` confirms current production compatibility and reports the
