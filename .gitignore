@@ -5,6 +5,7 @@ coverage/
 .env.*
 !.env.example
 config/groups.json
+INDEXER_FEATURES.md
 artifacts/
 *.log
 .DS_Store

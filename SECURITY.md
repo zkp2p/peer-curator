@@ -12,3 +12,9 @@
   writes are idempotent.
 - Treat an unexpected removal plan, schema error, resolver change, or ownership
   change as an incident. The process intentionally exits before transacting.
+- Treat a stale membership watermark, missing group-creation projection,
+  registry source-address drift, or incomplete event backfill as an incident.
+  There is intentionally no RPC log fallback.
+- Keep `SNAPSHOT_CONFIRMATIONS` nonzero in production. Lowering the confirmation
+  buffer increases the chance of reconciling indexer and RPC state from
+  different sides of a tip reorganization.

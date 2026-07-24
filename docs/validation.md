@@ -21,6 +21,9 @@ The API-key and paced public modes produced identical membership counts. The
 keyed mode sent `x-api-key`; the public mode omitted it and enforced a local
 650 ms request interval.
 
+The calculation was rerun after the indexer-backed membership refactor and
+returned the same source rows and all six tier counts.
+
 The blocklist contains 25 wallet hashes. A positive lookup was checked against
 the source snapshot without logging or persisting the wallet. No credential or
 member address was written or logged.
@@ -57,15 +60,20 @@ pnpm typecheck
 pnpm test
 pnpm test:coverage
 pnpm build
-pnpm check:upstream
 pnpm calculate
 pnpm verify -- 0x...
 pnpm compare:local -- /path/to/group-seeds
-Node 22 CI: typecheck, 16 tests, build
+Node 22 local: typecheck, 22 tests, coverage, build
 ```
 
-`pnpm check:upstream` confirms current production compatibility and reports the
-known forward incompatibility in indexer `main`.
+`pnpm check:upstream` confirms current aggregate/contract compatibility and
+exits nonzero on the not-yet-implemented enriched membership-event schema and
+handler. This is the expected rollout gate until the indexer prerequisite is
+merged. It also reports the known tier forward incompatibility in indexer
+`main`.
 
 No on-chain plan was run because a production registry deployment and the six
-group IDs are not present in the current contracts deployment registry.
+group IDs are not present in the current contracts deployment registry. The
+membership-event consumer path is covered by mocked GraphQL and replay tests;
+end-to-end parity must be recorded after the indexer surface is deployed and
+backfilled.

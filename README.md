@@ -8,8 +8,8 @@ Calculates and maintains two three-tier, exact-membership policy families in
 
 The service pulls production indexer aggregates, excludes wallets whose
 address hashes are in the committed denylist, calculates desired membership,
-reconstructs current registry membership from events, and submits the minimal
-add/remove transaction batches.
+reconstructs current registry membership from indexer-provided events, and
+submits the minimal add/remove transaction batches.
 
 ## High-level tiers
 
@@ -58,8 +58,10 @@ JSON source file to sorted hashes without printing the source wallets.
 ## Safety model
 
 - Exact-tier groups: a member belongs to one tier per policy family.
-- Current on-chain state comes from replaying `MemberAdded` and `MemberRemoved`
-  from the configured registry deployment block.
+- Current on-chain state comes from replaying indexed `MemberAdded` and
+  `MemberRemoved` events through a fixed, confirmed Base block.
+- The indexer's processed-block watermark must cover that fixed block, and all
+  configured `GroupCreated` projections must exist.
 - Indexer or RPC failures stop the run.
 - Missing GraphQL fields stop the run.
 - Nonexistent groups, unexpected resolvers, or a signer that is not the group
@@ -120,6 +122,10 @@ Runtime credentials:
 - `RPC_URL` — required for `plan` and `sync`.
 - `GROUP_ADMIN_PRIVATE_KEY` — required only for execution.
 
+`SNAPSHOT_CONFIRMATIONS` controls how far behind the RPC tip membership and
+governance are pinned. The default 20-block buffer tolerates ordinary indexer
+lag and reduces tip-reorg risk.
+
 The private key must resolve to the owner returned by `getGroup` for every
 configured group.
 
@@ -136,16 +142,19 @@ pnpm check
 pnpm check:upstream
 ```
 
-## Why membership is reconstructed from events
+## Indexer-backed membership reconstruction
 
 `AddressGroupRegistry.members(groupId, wallet)` answers whether one known
 wallet is a member, but the contract does not expose a function that lists
 every member. A reconciler needs that full current set so it can remove stale
 wallets as well as add missing ones.
 
-The service scans `MemberAdded` and `MemberRemoved` logs from the registry
-deployment block, sorts them by block and log position, and applies them in
-order:
+The service fixes a confirmed RPC block number (`SNAPSHOT_CONFIRMATIONS`
+defaults to 20), requires
+`chain_metadata.latest_processed_block` to cover it, then reads every
+`AddressGroupMembershipEvent` for the configured registry and groups between
+the registry deployment block and that fixed block. It sorts those indexed
+events by block and log position and applies them in order:
 
 ```text
 MemberAdded(group, wallet)   -> add wallet to the local set
@@ -153,9 +162,14 @@ MemberRemoved(group, wallet) -> remove wallet from the local set
 ```
 
 The resulting set is the current on-chain membership reconstructed from the
-chain's append-only history. `GroupCreated` logs and `getGroup` reads
-separately verify that each configured group exists and has the expected
-governance.
+chain's append-only history. The indexer's `AddressGroup` projection proves
+each group creation was indexed. Pinned `getGroup` reads separately verify
+that each configured group exists and has the expected governance.
+
+The indexer surface is a hard dependency for `plan` and `sync`. The reconciler
+does not fall back to RPC log scanning: a missing event entity, incomplete
+group backfill, or stale processing watermark stops the run before a
+transaction can be built.
 
 Recommended rollout:
 
@@ -186,4 +200,6 @@ operations; this repository does not create or rotate secrets.
 The current production indexer supports the exact preserved formulas. Latest
 indexer `main` has intentionally removed their aggregate fields. See
 [docs/compatibility.md](docs/compatibility.md). The service fails closed if
-that incompatible schema reaches its configured endpoint.
+that incompatible schema reaches its configured endpoint. `plan` and `sync`
+also remain gated until the enriched membership-event entity is deployed and
+backfilled.

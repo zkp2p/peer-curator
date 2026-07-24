@@ -8,20 +8,16 @@ import type {
 } from "viem";
 import { zeroAddress } from "viem";
 import { base } from "viem/chains";
-import {
-  addressGroupRegistryAbi,
-  groupCreatedEvent,
-  memberAddedEvent,
-  memberRemovedEvent,
-} from "./contracts.js";
+import { addressGroupRegistryAbi } from "./contracts.js";
 import { type GroupsConfig, normalizeAddress } from "./domain.js";
+import type { IndexedMembershipSnapshot } from "./indexer.js";
 
 export interface MembershipEvent {
   groupId: bigint;
   member: Address;
   present: boolean;
   blockNumber: bigint;
-  logIndex: number;
+  logIndex: bigint;
 }
 
 export interface GroupGovernance {
@@ -35,7 +31,8 @@ export interface GroupGovernance {
 export interface RegistryState {
   membersByGroupId: Map<bigint, Set<Address>>;
   governanceByGroupId: Map<bigint, GroupGovernance>;
-  latestBlock: bigint;
+  snapshotBlock: bigint;
+  indexedThroughBlock: bigint;
 }
 
 export interface GroupMutation {
@@ -55,12 +52,15 @@ export function replayMembershipEvents(
     if (left.blockNumber !== right.blockNumber) {
       return left.blockNumber < right.blockNumber ? -1 : 1;
     }
-    return left.logIndex - right.logIndex;
+    if (left.logIndex === right.logIndex) return 0;
+    return left.logIndex < right.logIndex ? -1 : 1;
   });
 
   for (const event of ordered) {
     const members = state.get(event.groupId);
-    if (!members) continue;
+    if (!members) {
+      throw new Error("Membership history contains an unexpected group");
+    }
     if (event.present) members.add(event.member);
     else members.delete(event.member);
   }
@@ -70,81 +70,23 @@ export function replayMembershipEvents(
 export async function loadRegistryState<transport extends Transport>(
   client: PublicClient<transport, typeof base>,
   config: GroupsConfig,
-  logBlockRange: bigint,
+  membership: IndexedMembershipSnapshot,
 ): Promise<RegistryState> {
-  const bytecode = await client.getBytecode({ address: config.registryAddress });
+  if (membership.indexedThroughBlock < membership.snapshotBlock) {
+    throw new Error("Indexer membership snapshot is incomplete");
+  }
+  if (config.registryDeploymentBlock > membership.snapshotBlock) {
+    throw new Error("registryDeploymentBlock is greater than the chain snapshot");
+  }
+  const bytecode = await client.getBytecode({
+    address: config.registryAddress,
+    blockNumber: membership.snapshotBlock,
+  });
   if (!bytecode || bytecode === "0x") {
     throw new Error("AddressGroupRegistry has no deployed bytecode");
   }
 
-  const latestBlock = await client.getBlockNumber();
-  if (config.registryDeploymentBlock > latestBlock) {
-    throw new Error("registryDeploymentBlock is greater than the current chain height");
-  }
-
-  const events: MembershipEvent[] = [];
-  const createdGroupIds = new Set<bigint>();
-  for (
-    let fromBlock = config.registryDeploymentBlock;
-    fromBlock <= latestBlock;
-    fromBlock += logBlockRange
-  ) {
-    const toBlock =
-      fromBlock + logBlockRange - 1n > latestBlock ? latestBlock : fromBlock + logBlockRange - 1n;
-    const [created, added, removed] = await Promise.all([
-      client.getLogs({
-        address: config.registryAddress,
-        event: groupCreatedEvent,
-        fromBlock,
-        toBlock,
-      }),
-      client.getLogs({
-        address: config.registryAddress,
-        event: memberAddedEvent,
-        fromBlock,
-        toBlock,
-      }),
-      client.getLogs({
-        address: config.registryAddress,
-        event: memberRemovedEvent,
-        fromBlock,
-        toBlock,
-      }),
-    ]);
-
-    for (const log of created) {
-      if (log.args.groupId !== undefined) createdGroupIds.add(log.args.groupId);
-    }
-    for (const log of added) {
-      if (log.args.groupId === undefined || log.args.member === undefined) continue;
-      events.push({
-        groupId: log.args.groupId,
-        member: normalizeAddress(log.args.member),
-        present: true,
-        blockNumber: log.blockNumber,
-        logIndex: log.logIndex,
-      });
-    }
-    for (const log of removed) {
-      if (log.args.groupId === undefined || log.args.member === undefined) continue;
-      events.push({
-        groupId: log.args.groupId,
-        member: normalizeAddress(log.args.member),
-        present: false,
-        blockNumber: log.blockNumber,
-        logIndex: log.logIndex,
-      });
-    }
-  }
-
   const uniqueGroupIds = [...new Set(config.groups.map((group) => group.groupId))];
-  for (const groupId of uniqueGroupIds) {
-    if (!createdGroupIds.has(groupId)) {
-      throw new Error(
-        `GroupCreated event for configured group ${groupId} was not found at or after registryDeploymentBlock`,
-      );
-    }
-  }
   const governanceRows = await Promise.all(
     uniqueGroupIds.map(async (groupId): Promise<GroupGovernance> => {
       const [owner, pendingOwner, resolver, exists] = await client.readContract({
@@ -152,6 +94,7 @@ export async function loadRegistryState<transport extends Transport>(
         abi: addressGroupRegistryAbi,
         functionName: "getGroup",
         args: [groupId],
+        blockNumber: membership.snapshotBlock,
       });
       return {
         groupId,
@@ -164,9 +107,10 @@ export async function loadRegistryState<transport extends Transport>(
   );
 
   return {
-    membersByGroupId: replayMembershipEvents(events, uniqueGroupIds),
+    membersByGroupId: replayMembershipEvents(membership.events, uniqueGroupIds),
     governanceByGroupId: new Map(governanceRows.map((row) => [row.groupId, row])),
-    latestBlock,
+    snapshotBlock: membership.snapshotBlock,
+    indexedThroughBlock: membership.indexedThroughBlock,
   };
 }
 

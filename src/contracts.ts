@@ -1,4 +1,4 @@
-import { parseAbi, parseAbiItem } from "viem";
+import { parseAbi } from "viem";
 
 /**
  * Minimal runtime surface copied from zkp2p/zkp2p-v2-contracts main at
@@ -14,15 +14,5 @@ export const addressGroupRegistryAbi = parseAbi([
   "event MemberAdded(uint256 indexed groupId, address indexed member)",
   "event MemberRemoved(uint256 indexed groupId, address indexed member)",
 ]);
-
-export const memberAddedEvent = parseAbiItem(
-  "event MemberAdded(uint256 indexed groupId, address indexed member)",
-);
-export const memberRemovedEvent = parseAbiItem(
-  "event MemberRemoved(uint256 indexed groupId, address indexed member)",
-);
-export const groupCreatedEvent = parseAbiItem(
-  "event GroupCreated(uint256 indexed groupId, address indexed owner, string name)",
-);
 
 export const CONTRACTS_UPSTREAM_COMMIT = "764a125d7a859184127a36c44de3beaf5611c0d5";

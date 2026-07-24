@@ -49,7 +49,8 @@ function fixtures(): {
     onchain: {
       membersByGroupId: new Map(groups.map((group) => [group.groupId, new Set<Address>()])),
       governanceByGroupId: new Map(),
-      latestBlock: 100n,
+      snapshotBlock: 100n,
+      indexedThroughBlock: 100n,
     },
   };
 }

@@ -3,15 +3,16 @@
 ## Scope
 
 This repository owns the off-chain calculation and on-chain reconciliation of
-Peer/Plus/Pro curated groups. It consumes production indexer aggregates, a
-committed hashed blocked-wallet snapshot, and `AddressGroupRegistry`.
+Peer/Plus/Pro curated groups. It consumes production indexer aggregates,
+indexed `AddressGroupRegistry` membership history, a committed hashed
+blocked-wallet snapshot, and pinned registry reads.
 
 ## Safety
 
 - Never log member addresses, indexer API keys, RPC credentials, or signing
   keys.
-- Every indexer/RPC failure is fail-closed. Never reconcile a partial
-  desired set.
+- Every indexer/RPC failure is fail-closed. Never reconcile a partial desired
+  set or membership history.
 - `calculate` and `plan` never transact.
 - `sync` transacts only with `EXECUTE=true`, a matching group-owner signer, and
   all configured safety limits passing.

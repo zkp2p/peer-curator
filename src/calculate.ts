@@ -6,13 +6,16 @@ import { BLOCKED_WALLET_HASHES, isBlockedWallet } from "./staticWalletRules.js";
 
 export async function calculateDesiredSnapshot(
   settings: RuntimeSettings,
+  client?: IndexerClient,
 ): Promise<DesiredSnapshot> {
-  const indexer = new IndexerClient(
-    settings.indexerUrl,
-    settings.indexerApiKey,
-    settings.chainId,
-    settings.requestTimeoutMs,
-  );
+  const indexer =
+    client ??
+    new IndexerClient(
+      settings.indexerUrl,
+      settings.indexerApiKey,
+      settings.chainId,
+      settings.requestTimeoutMs,
+    );
 
   const [takerStats, platformStats, peerPayStats] = await Promise.all([
     indexer.getTakerStats(),

@@ -4,6 +4,7 @@ import { base } from "viem/chains";
 import { calculateDesiredSnapshot } from "./calculate.js";
 import type { RuntimeSettings } from "./config.js";
 import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
+import { IndexerClient } from "./indexer.js";
 import type { Logger } from "./logger.js";
 import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
 import {
@@ -18,7 +19,13 @@ export async function run(
   logger: Logger,
   verifyAddress?: string,
 ): Promise<void> {
-  const desired = await calculateDesiredSnapshot(settings);
+  const indexer = new IndexerClient(
+    settings.indexerUrl,
+    settings.indexerApiKey,
+    settings.chainId,
+    settings.requestTimeoutMs,
+  );
+  const desired = await calculateDesiredSnapshot(settings, indexer);
 
   logger.info(
     {
@@ -63,7 +70,25 @@ export async function run(
     chain: base,
     transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
   });
-  const onchain = await loadRegistryState(publicClient, groups, settings.logBlockRange);
+  const [rpcChainId, rpcLatestBlock] = await Promise.all([
+    publicClient.getChainId(),
+    publicClient.getBlockNumber(),
+  ]);
+  if (rpcChainId !== settings.chainId) {
+    throw new Error("RPC chain does not match CHAIN_ID");
+  }
+  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
+  if (rpcLatestBlock < confirmationBlocks) {
+    throw new Error("RPC chain height is below SNAPSHOT_CONFIRMATIONS");
+  }
+  const snapshotBlock = rpcLatestBlock - confirmationBlocks;
+  const membership = await indexer.getAddressGroupMembershipSnapshot({
+    registryAddress: groups.registryAddress,
+    groupIds: groups.groups.map((group) => group.groupId),
+    deploymentBlock: groups.registryDeploymentBlock,
+    snapshotBlock,
+  });
+  const onchain = await loadRegistryState(publicClient, groups, membership);
   const account = settings.execute
     ? privateKeyToAccount(settings.groupAdminPrivateKey as `0x${string}`)
     : undefined;
@@ -90,7 +115,9 @@ export async function run(
 
   logger.info(
     {
-      latestBlock: onchain.latestBlock.toString(),
+      rpcLatestBlock: rpcLatestBlock.toString(),
+      snapshotBlock: onchain.snapshotBlock.toString(),
+      indexedThroughBlock: onchain.indexedThroughBlock.toString(),
       totalAdds: plan.totalAdds,
       totalRemovals: plan.totalRemovals,
       transactionBatches: plan.mutations.length,
