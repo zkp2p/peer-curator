@@ -117,6 +117,7 @@ export async function executeMutations<
   account: PrivateKeyAccount;
   registryAddress: Address;
   mutations: GroupMutation[];
+  onTransaction?: (hash: `0x${string}`, mutation: GroupMutation) => void;
 }): Promise<`0x${string}`[]> {
   const transactionHashes: `0x${string}`[] = [];
   for (const mutation of input.mutations) {
@@ -162,6 +163,7 @@ export async function executeMutations<
       throw new Error(`Registry transaction reverted: ${hash}`);
     }
     transactionHashes.push(hash);
+    input.onTransaction?.(hash, mutation);
   }
   return transactionHashes;
 }

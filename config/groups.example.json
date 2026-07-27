@@ -7,37 +7,43 @@
       "scope": "historical-taker",
       "tier": "PEER",
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000001",
-      "minimumMembers": 700
+      "minimumMembers": 1350,
+      "maximumMembers": 2600
     },
     {
       "scope": "historical-taker",
       "tier": "PLUS",
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000002",
-      "minimumMembers": 500
+      "minimumMembers": 680,
+      "maximumMembers": 1300
     },
     {
       "scope": "historical-taker",
       "tier": "PRO",
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000003",
-      "minimumMembers": 150
+      "minimumMembers": 165,
+      "maximumMembers": 320
     },
     {
       "scope": "current-earn",
       "tier": "PEER",
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000004",
-      "minimumMembers": 350
+      "minimumMembers": 500,
+      "maximumMembers": 960
     },
     {
       "scope": "current-earn",
       "tier": "PLUS",
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000005",
-      "minimumMembers": 120
+      "minimumMembers": 175,
+      "maximumMembers": 330
     },
     {
       "scope": "current-earn",
       "tier": "PRO",
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000006",
-      "minimumMembers": 40
+      "minimumMembers": 50,
+      "maximumMembers": 100
     }
   ]
 }
