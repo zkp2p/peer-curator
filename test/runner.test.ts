@@ -91,6 +91,49 @@ describe("runWithSnapshotRetries", () => {
 });
 
 describe("exclusive to cascading migration", () => {
+  function violationCount(fixture: ReturnType<typeof planFixture>): number {
+    return findCurrentCascadeViolations(fixture.config, fixture.onchain).reduce(
+      (total, violation) => total + violation.missingCount,
+      0,
+    );
+  }
+
+  function expectDesiredPrefix(
+    fixture: ReturnType<typeof planFixture>,
+    wallet: ReturnType<typeof addr>,
+  ) {
+    const policy = fixture.desired.policies.get("historical-taker");
+    if (!policy) throw new Error("Missing historical-taker policy");
+
+    for (let index = 0; index < TIERS.length; index += 1) {
+      const tier = TIERS[index];
+      if (!tier) throw new Error(`Tier missing at index ${index}`);
+      expect(fixture.onchain.membersByGroupId.get(groupId(index + 1))?.has(wallet) ?? false).toBe(
+        policy.membersByTier[tier].has(wallet),
+      );
+    }
+  }
+
+  function converge(fixture: ReturnType<typeof planFixture>): void {
+    let runs = 0;
+    while (runs < 5) {
+      const plan = buildReconciliationPlan({
+        ...fixture,
+        batchSize: 1,
+        addBudget: 100,
+      });
+      const phase = selectPhase({
+        deferredAdds: plan.deferredAdds,
+        cascadeViolationCount: findCurrentCascadeViolations(fixture.config, fixture.onchain).length,
+      });
+      const mutations = mutationsForPhase(plan, phase);
+      if (mutations.length === 0) break;
+      applyMutations(fixture.onchain, mutations);
+      runs += 1;
+    }
+    expect(runs).toBeLessThan(5);
+  }
+
   it("repairs a legacy PRO membership once backfill is complete", () => {
     const { desired, config, onchain } = planFixture();
     const wallet = addr("1");
@@ -192,6 +235,83 @@ describe("exclusive to cascading migration", () => {
       const tier = TIERS[id - 1];
       const expected = tier ? wanted.includes(tier) : false;
       expect(onchain.membersByGroupId.get(groupId(id))?.has(wallet) ?? false).toBe(expected);
+    }
+  });
+
+  it.each([
+    ["PRO to PEER", 3],
+    ["PLUS to PEER", 2],
+  ])(
+    "keeps an interrupted %s migration non-worsening and convergent at every batch boundary",
+    (_label, legacyGroup) => {
+      for (let stopAfter = 0; stopAfter <= 2; stopAfter += 1) {
+        const fixture = planFixture();
+        const wallet = addr("1");
+        fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(wallet);
+        fixture.onchain.membersByGroupId.set(groupId(legacyGroup), new Set([wallet]));
+
+        const plan = buildReconciliationPlan({
+          ...fixture,
+          batchSize: 1,
+          addBudget: 100,
+        });
+        const phase = selectPhase({
+          deferredAdds: plan.deferredAdds,
+          cascadeViolationCount: findCurrentCascadeViolations(fixture.config, fixture.onchain)
+            .length,
+        });
+        expect(phase).toBe("MIGRATION_REPAIR");
+        const selected = mutationsForPhase(plan, phase);
+        expect(selected).toHaveLength(2);
+
+        let appliedAddBatches = 0;
+        let previousViolations = violationCount(fixture);
+        for (const mutation of selected.slice(0, stopAfter)) {
+          if (mutation.operation === "remove") {
+            expect(appliedAddBatches).toBe(plan.addMutations.length);
+          } else {
+            appliedAddBatches += 1;
+          }
+          applyMutations(fixture.onchain, [mutation]);
+          const currentViolations = violationCount(fixture);
+          expect(currentViolations).toBeLessThanOrEqual(previousViolations);
+          previousViolations = currentViolations;
+        }
+
+        converge(fixture);
+        expect(violationCount(fixture)).toBe(0);
+        expectDesiredPrefix(fixture, wallet);
+      }
+    },
+  );
+
+  it("leaves valid cascade prefixes at every NORMAL-phase batch boundary", () => {
+    for (let stopAfter = 0; stopAfter <= 2; stopAfter += 1) {
+      const fixture = planFixture();
+      const wallet = addr("1");
+      fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(wallet);
+      for (let id = 1; id <= 3; id += 1) {
+        fixture.onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
+      }
+
+      const plan = buildReconciliationPlan({
+        ...fixture,
+        batchSize: 1,
+        addBudget: 100,
+      });
+      const phase = selectPhase({
+        deferredAdds: plan.deferredAdds,
+        cascadeViolationCount: findCurrentCascadeViolations(fixture.config, fixture.onchain).length,
+      });
+      expect(phase).toBe("NORMAL");
+      const selected = mutationsForPhase(plan, phase);
+      expect(selected).toHaveLength(2);
+      expect(findCurrentCascadeViolations(fixture.config, fixture.onchain)).toEqual([]);
+
+      for (const mutation of selected.slice(0, stopAfter)) {
+        applyMutations(fixture.onchain, [mutation]);
+        expect(findCurrentCascadeViolations(fixture.config, fixture.onchain)).toEqual([]);
+      }
     }
   });
 });

@@ -64,11 +64,12 @@ for (const scope of POLICY_SCOPES) {
   if (!snapshot) throw new Error(`Calculated snapshot omitted ${scope}`);
   const scopeDirectory = await findScopeDirectory(scope);
 
-  const exclusiveSeeds = {} as Record<Tier, Set<Address>>;
-  for (const tier of TIERS) {
-    const filename = resolve(scopeDirectory.path, `${tier.toLowerCase()}.txt`);
-    exclusiveSeeds[tier] = await readMemberFile(filename);
-  }
+  const seedFile = (tier: Tier) => resolve(scopeDirectory.path, `${tier.toLowerCase()}.txt`);
+  const exclusiveSeeds: Record<Tier, Set<Address>> = {
+    PEER: await readMemberFile(seedFile("PEER")),
+    PLUS: await readMemberFile(seedFile("PLUS")),
+    PRO: await readMemberFile(seedFile("PRO")),
+  };
   if (!scopeDirectory.alreadyThreeTier) {
     const formerTopTier = await readMemberFile(resolve(scopeDirectory.path, "platinum.txt"));
     for (const address of formerTopTier) exclusiveSeeds.PRO.add(address);

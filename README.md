@@ -91,8 +91,12 @@ JSON source file to sorted hashes without printing the source wallets.
 - Nonexistent groups, unexpected resolvers, or a signer that is not the group
   curator stop execution.
 - Adds are simulated and mined before any removals, and within each direction they are ordered
-  by tier: adds lowest-first, removals highest-first. Interrupting a run therefore leaves every
-  wallet holding a valid cascade prefix — under-granted at worst, never incoherent.
+  by tier: adds lowest-first, removals highest-first. **Once the on-chain state is cascading,**
+  interrupting a run therefore leaves every wallet holding a valid cascade prefix — under-granted
+  at worst, never incoherent. That guarantee does not hold during migration, which by definition
+  starts from a non-cascading state: a legacy PRO-only wallet gaining its PEER add is briefly
+  `{PEER, PRO}`, still missing PLUS. What holds throughout migration is weaker but sufficient —
+  mutations never introduce a new violation, and each run converges toward the desired prefix.
 - Each transaction hash is logged as its receipt confirms, so a mid-run revert still leaves a
   complete record of what was mined.
 - Global add/remove limits, per-group removal percentages, group size bounds, and an
@@ -240,8 +244,10 @@ Recommended rollout:
 3. Deploy the cascading code with the existing six-entry `config/groups.json`.
 4. Run `plan`. Review the `removalReasons` report; if it is non-empty, get that approved
    separately before proceeding. Cascading membership is a superset of exclusive membership, so
-   a clean migration should produce zero removals — any removal means the deployed state
-   diverged from the calculation and deserves an explanation.
+   the change to cascading does not by itself imply any removal. Removals can still legitimately
+   arise where the deployed state has diverged from current desired membership — lock-score
+   demotions since the last sync, denylist additions, a seed taken from an older snapshot, or
+   manual registry edits. `removalReasons` categorises them; every one still needs review.
 5. Run `sync` with `EXECUTE=true`.
 6. After each run, wait until the indexer watermark covers the last mined transaction's block
    before replanning.
@@ -249,6 +255,12 @@ Recommended rollout:
 8. If the cascade preflight still fails, the run selects `MIGRATION_REPAIR`. Review the removals,
    set `ALLOW_MIGRATION_REMOVALS=true` for that run only, and return it to `false` immediately
    after. Repeat until `cascadeViolations` is empty.
+
+   `ALLOW_MIGRATION_REMOVALS` authorises the phase; it does not lift the removal limits.
+   `MAX_TOTAL_REMOVALS` (100), `MAX_REMOVAL_WALLETS` (50) and `MAX_REMOVAL_BPS_PER_GROUP` (500)
+   still abort the run independently. If a legitimate migration exceeds them, raise the specific
+   limit for that run rather than reaching for a larger blanket increase — the plan log reports
+   `totalRemovals` and `removalWalletCount` so you can tell which one is binding.
 9. Confirm `plan` reports `phase: NORMAL`, then resume the cron.
 
 Cascading the three tiers produces about 3,684 memberships (1,703 + 849 + 210 historical and
