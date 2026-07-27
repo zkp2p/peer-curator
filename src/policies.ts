@@ -1,14 +1,20 @@
 import type { Address } from "viem";
-import { emptyTierSets, type PolicySnapshot, type Tier } from "./domain.js";
+import {
+  assertCascadingSets,
+  emptyTierSets,
+  type PolicySnapshot,
+  TIERS,
+  type Tier,
+} from "./domain.js";
 import type { MakerPeerPayStatsRow, MakerPlatformStatsRow, TakerStatsRow } from "./indexer.js";
 
 const TIER_ORDER = ["PEASANT", "PEER", "PLUS", "PRO", "TOP"] as const;
 type ComputedTier = (typeof TIER_ORDER)[number];
-type ComputedMemberTier = Exclude<ComputedTier, "PEASANT">;
+type ThresholdTier = Exclude<ComputedTier, "PEASANT">;
 
 interface TierPolicy {
   scope: PolicySnapshot["scope"];
-  thresholds: Record<ComputedMemberTier, bigint>;
+  thresholds: Record<ThresholdTier, bigint>;
   lockScorePenaltyThresholds: readonly bigint[];
 }
 
@@ -60,18 +66,10 @@ export function classifyTier(
 function addMember(snapshot: PolicySnapshot, tier: ComputedTier, address: Address): void {
   if (tier === "PEASANT") return;
   const publicTier: Tier = tier === "TOP" ? "PRO" : tier;
-  snapshot.membersByTier[publicTier].add(address);
-}
-
-function assertExclusive(snapshot: PolicySnapshot): void {
-  const seen = new Set<Address>();
-  for (const members of Object.values(snapshot.membersByTier)) {
-    for (const address of members) {
-      if (seen.has(address)) {
-        throw new Error(`${snapshot.scope} produced cross-tier duplicate membership`);
-      }
-      seen.add(address);
-    }
+  const highestIndex = TIERS.indexOf(publicTier);
+  for (let index = 0; index <= highestIndex; index += 1) {
+    const cascadeTier = TIERS[index];
+    if (cascadeTier) snapshot.membersByTier[cascadeTier].add(address);
   }
 }
 
@@ -96,7 +94,7 @@ export function calculateHistoricalTakerPolicy(input: {
     addMember(snapshot, tier, row.owner);
   }
 
-  assertExclusive(snapshot);
+  assertCascadingSets(snapshot.membersByTier, snapshot.scope);
   return snapshot;
 }
 
@@ -143,6 +141,6 @@ export function calculateCurrentEarnPolicy(input: {
     addMember(snapshot, tier, address);
   }
 
-  assertExclusive(snapshot);
+  assertCascadingSets(snapshot.membersByTier, snapshot.scope);
   return snapshot;
 }

@@ -73,8 +73,11 @@ const envSchema = z.object({
   SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("0"),
   SNAPSHOT_MAX_ATTEMPTS: positiveInteger("20"),
   SNAPSHOT_RETRY_DELAY_MS: nonNegativeInteger("250"),
-  MAX_TOTAL_ADDS: nonNegativeInteger("3000"),
+  MAX_PLANNED_ADDS: nonNegativeInteger("25000"),
+  MAX_EXECUTED_ADDS_PER_RUN: positiveInteger("3000"),
   MAX_TOTAL_REMOVALS: nonNegativeInteger("100"),
+  MAX_REMOVAL_WALLETS: nonNegativeInteger("50"),
+  ALLOW_MIGRATION_REMOVALS: booleanFromString,
   MAX_REMOVAL_BPS_PER_GROUP: nonNegativeInteger("500"),
   REQUEST_TIMEOUT_MS: positiveInteger("20000"),
   LOG_LEVEL: z.string().default("info"),
@@ -86,12 +89,17 @@ const groupFileSchema = z.object({
   registryDeploymentBlock: z.string().regex(/^\d+$/),
   groups: z
     .array(
-      z.object({
-        scope: z.enum(POLICY_SCOPES),
-        tier: z.enum(TIERS),
-        groupId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
-        minimumMembers: z.number().int().nonnegative(),
-      }),
+      z
+        .object({
+          scope: z.enum(POLICY_SCOPES),
+          tier: z.enum(TIERS),
+          groupId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+          minimumMembers: z.number().int().nonnegative(),
+          maximumMembers: z.number().int().positive(),
+        })
+        .refine((group) => group.maximumMembers >= group.minimumMembers, {
+          message: "maximumMembers must be greater than or equal to minimumMembers",
+        }),
     )
     .length(6),
 });
@@ -113,7 +121,10 @@ export interface RuntimeSettings {
   snapshotConfirmations: number;
   snapshotMaxAttempts: number;
   snapshotRetryDelayMs: number;
-  maxTotalAdds: number;
+  maxPlannedAdds: number;
+  maxExecutedAddsPerRun: number;
+  maxRemovalWallets: number;
+  allowMigrationRemovals: boolean;
   maxTotalRemovals: number;
   maxRemovalBpsPerGroup: number;
   requestTimeoutMs: number;
@@ -140,11 +151,7 @@ function validateGroupCoverage(groups: GroupsConfig): void {
   }
 }
 
-async function readGroupsConfig(
-  inlineJson: string | undefined,
-  path: string,
-): Promise<GroupsConfig> {
-  const raw = inlineJson ?? (await readFile(path, "utf8"));
+export function parseGroupsConfig(raw: string): GroupsConfig {
   const parsed = groupFileSchema.parse(JSON.parse(raw));
   const result: GroupsConfig = {
     chainId: parsed.chainId,
@@ -155,10 +162,18 @@ async function readGroupsConfig(
       tier: group.tier as Tier,
       groupId: normalizeGroupId(group.groupId),
       minimumMembers: group.minimumMembers,
+      maximumMembers: group.maximumMembers,
     })),
   };
   validateGroupCoverage(result);
   return result;
+}
+
+async function readGroupsConfig(
+  inlineJson: string | undefined,
+  path: string,
+): Promise<GroupsConfig> {
+  return parseGroupsConfig(inlineJson ?? (await readFile(path, "utf8")));
 }
 
 export async function loadSettings(command: Command): Promise<RuntimeSettings> {
@@ -202,7 +217,10 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     snapshotConfirmations: env.SNAPSHOT_CONFIRMATIONS,
     snapshotMaxAttempts: env.SNAPSHOT_MAX_ATTEMPTS,
     snapshotRetryDelayMs: env.SNAPSHOT_RETRY_DELAY_MS,
-    maxTotalAdds: env.MAX_TOTAL_ADDS,
+    maxPlannedAdds: env.MAX_PLANNED_ADDS,
+    maxExecutedAddsPerRun: env.MAX_EXECUTED_ADDS_PER_RUN,
+    maxRemovalWallets: env.MAX_REMOVAL_WALLETS,
+    allowMigrationRemovals: env.ALLOW_MIGRATION_REMOVALS,
     maxTotalRemovals: env.MAX_TOTAL_REMOVALS,
     maxRemovalBpsPerGroup: env.MAX_REMOVAL_BPS_PER_GROUP,
     requestTimeoutMs: env.REQUEST_TIMEOUT_MS,

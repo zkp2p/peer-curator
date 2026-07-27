@@ -7,10 +7,13 @@ import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
 import { IndexerClient } from "./indexer.js";
 import type { Logger } from "./logger.js";
 import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
+import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "./phases.js";
 import {
+  assertDesiredSnapshotBounds,
   assertDesiredSnapshotComplete,
   assertPlanSafe,
   buildReconciliationPlan,
+  summarizeRemovalReasons,
 } from "./reconcile.js";
 import { isBlockedWallet } from "./staticWalletRules.js";
 
@@ -61,7 +64,7 @@ export async function run(
       policies: [...desired.policies.values()].map((policy) => ({
         scope: policy.scope,
         sourceRows: policy.sourceRows,
-        counts: tierCounts(policy),
+        cumulativeCounts: tierCounts(policy),
       })),
     },
     "Desired group membership calculated",
@@ -76,7 +79,7 @@ export async function run(
     logger.info(
       {
         blocked: isBlockedWallet(address),
-        tiers: {
+        highestTier: {
           historicalTaker: tierForAddress(historical, address),
           currentEarn: tierForAddress(earn, address),
         },
@@ -90,6 +93,7 @@ export async function run(
   if (!settings.groups) throw new Error("Group configuration is required");
   const groups = settings.groups;
   assertDesiredSnapshotComplete(desired, groups);
+  assertDesiredSnapshotBounds(desired, groups);
   if (!settings.rpcUrl) throw new Error("RPC_URL is required");
 
   const publicClient = createPublicClient({
@@ -134,23 +138,40 @@ export async function run(
     config: groups,
     onchain,
     batchSize: settings.batchSize,
+    addBudget: settings.maxExecutedAddsPerRun,
+  });
+  const cascadeViolations = findCurrentCascadeViolations(groups, onchain);
+  const phase = selectPhase({
+    deferredAdds: plan.deferredAdds,
+    cascadeViolationCount: cascadeViolations.length,
   });
   assertPlanSafe({
     plan,
+    phase,
     allowInitialSeed: settings.allowInitialSeed,
-    maxTotalAdds: settings.maxTotalAdds,
+    allowMigrationRemovals: settings.allowMigrationRemovals,
+    maxPlannedAdds: settings.maxPlannedAdds,
     maxTotalRemovals: settings.maxTotalRemovals,
+    maxRemovalWallets: settings.maxRemovalWallets,
     maxRemovalBpsPerGroup: settings.maxRemovalBpsPerGroup,
   });
+
+  const mutations = mutationsForPhase(plan, phase);
 
   logger.info(
     {
       rpcLatestBlock: rpcLatestBlock.toString(),
       snapshotBlock: onchain.snapshotBlock.toString(),
       indexedThroughBlock: onchain.indexedThroughBlock.toString(),
+      phase,
+      cascadeViolations,
       totalAdds: plan.totalAdds,
+      deferredAdds: plan.deferredAdds,
       totalRemovals: plan.totalRemovals,
-      transactionBatches: plan.mutations.length,
+      removalWalletCount: plan.removalWalletCount,
+      removalReasons: summarizeRemovalReasons(plan, desired, isBlockedWallet),
+      removalsExecutable: phase !== "BACKFILL",
+      transactionBatches: mutations.length,
       initialSeed: plan.initialSeed,
       groups: plan.groups.map((group) => ({
         scope: group.definition.scope,
@@ -159,13 +180,14 @@ export async function run(
         currentCount: group.currentCount,
         desiredCount: group.desiredCount,
         adds: group.additions.length,
+        deferredAdds: group.deferredAdds,
         removals: group.removals.length,
       })),
     },
     settings.execute ? "Reconciliation plan approved for execution" : "Dry-run reconciliation plan",
   );
 
-  if (!settings.execute || plan.mutations.length === 0) return;
+  if (!settings.execute || mutations.length === 0) return;
   if (!account || !settings.groupAdminPrivateKey) {
     throw new Error("Execution account is unavailable");
   }
@@ -180,10 +202,20 @@ export async function run(
     walletClient,
     account,
     registryAddress: groups.registryAddress,
-    mutations: plan.mutations,
+    mutations,
+    onTransaction: (hash, mutation) =>
+      logger.info(
+        {
+          hash,
+          operation: mutation.operation,
+          groupId: mutation.groupId,
+          members: mutation.members.length,
+        },
+        "Registry transaction mined",
+      ),
   });
   logger.info(
-    { transactionCount: transactionHashes.length, transactionHashes },
+    { phase, transactionCount: transactionHashes.length },
     "On-chain group reconciliation completed",
   );
 }

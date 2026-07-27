@@ -1,13 +1,16 @@
 import type { Address } from "viem";
 import {
+  assertCascadingSets,
   type DesiredSnapshot,
   type GroupDefinition,
   type GroupsConfig,
   groupKey,
   POLICY_SCOPES,
   TIERS,
+  tierCounts,
 } from "./domain.js";
 import type { GroupMutation, RegistryState } from "./onchain.js";
+import type { ReconciliationPhase } from "./phases.js";
 
 export interface GroupPlan {
   definition: GroupDefinition;
@@ -15,13 +18,22 @@ export interface GroupPlan {
   desiredCount: number;
   additions: Address[];
   removals: Address[];
+  deferredAdds: number;
 }
 
+/**
+ * `additions`, `removals`, `totalAdds` and `totalRemovals` describe the FULL
+ * pre-truncation plan and are what validation reasons about. `addMutations` is
+ * post-truncation — only what this run will execute.
+ */
 export interface ReconciliationPlan {
   groups: GroupPlan[];
-  mutations: GroupMutation[];
+  addMutations: GroupMutation[];
+  removalMutations: GroupMutation[];
   totalAdds: number;
   totalRemovals: number;
+  deferredAdds: number;
+  removalWalletCount: number;
   initialSeed: boolean;
 }
 
@@ -48,6 +60,7 @@ export function buildReconciliationPlan(input: {
   config: GroupsConfig;
   onchain: RegistryState;
   batchSize: number;
+  addBudget: number;
 }): ReconciliationPlan {
   const groups = input.config.groups.map((definition): GroupPlan => {
     const current = input.onchain.membersByGroupId.get(definition.groupId);
@@ -59,19 +72,26 @@ export function buildReconciliationPlan(input: {
       desiredCount: desired.size,
       additions: sortedDifference(desired, current),
       removals: sortedDifference(current, desired),
+      deferredAdds: 0,
     };
   });
 
-  const addMutations = groups.flatMap((group) =>
-    chunks(group.additions, input.batchSize).map(
-      (members): GroupMutation => ({
-        operation: "add",
-        groupId: group.definition.groupId,
-        members,
-      }),
-    ),
-  );
-  const removeMutations = groups.flatMap((group) =>
+  const tierRank = (plan: GroupPlan) => TIERS.indexOf(plan.definition.tier);
+  const ascending = [...groups].sort((left, right) => tierRank(left) - tierRank(right));
+  const descending = [...groups].sort((left, right) => tierRank(right) - tierRank(left));
+
+  let remainingBudget = Math.max(0, input.addBudget);
+  const addMutations: GroupMutation[] = [];
+  for (const group of ascending) {
+    const scheduled = group.additions.slice(0, remainingBudget);
+    group.deferredAdds = group.additions.length - scheduled.length;
+    remainingBudget -= scheduled.length;
+    for (const members of chunks(scheduled, input.batchSize)) {
+      addMutations.push({ operation: "add", groupId: group.definition.groupId, members });
+    }
+  }
+
+  const removalMutations = descending.flatMap((group) =>
     chunks(group.removals, input.batchSize).map(
       (members): GroupMutation => ({
         operation: "remove",
@@ -81,13 +101,58 @@ export function buildReconciliationPlan(input: {
     ),
   );
 
+  const removalWallets = new Set<Address>();
+  for (const group of groups) {
+    for (const address of group.removals) removalWallets.add(address);
+  }
+
   return {
     groups,
-    mutations: [...addMutations, ...removeMutations],
+    addMutations,
+    removalMutations,
     totalAdds: groups.reduce((total, group) => total + group.additions.length, 0),
     totalRemovals: groups.reduce((total, group) => total + group.removals.length, 0),
+    deferredAdds: groups.reduce((total, group) => total + group.deferredAdds, 0),
+    removalWalletCount: removalWallets.size,
     initialSeed: groups.every((group) => group.currentCount === 0),
   };
+}
+
+export const REMOVAL_REASONS = ["blocked", "demoted", "not-a-candidate"] as const;
+export type RemovalReason = (typeof REMOVAL_REASONS)[number];
+
+/**
+ * Categorises planned removals for the migration approval report. "demoted"
+ * means the wallet is still curated in this scope but at a lower tier;
+ * "not-a-candidate" covers wallets that left the source set entirely, which
+ * includes legacy and manually-added registry memberships.
+ */
+export function summarizeRemovalReasons(
+  plan: ReconciliationPlan,
+  desired: DesiredSnapshot,
+  isBlocked: (address: Address) => boolean,
+): Record<RemovalReason, number> {
+  const totals: Record<RemovalReason, number> = {
+    blocked: 0,
+    demoted: 0,
+    "not-a-candidate": 0,
+  };
+
+  for (const group of plan.groups) {
+    const policy = desired.policies.get(group.definition.scope);
+    if (!policy) throw new Error(`Missing desired policy ${group.definition.scope}`);
+    for (const address of group.removals) {
+      if (isBlocked(address)) {
+        totals.blocked += 1;
+      } else if (TIERS.some((tier) => policy.membersByTier[tier].has(address))) {
+        totals.demoted += 1;
+      } else {
+        totals["not-a-candidate"] += 1;
+      }
+    }
+  }
+
+  return totals;
 }
 
 export function assertDesiredSnapshotComplete(
@@ -97,15 +162,9 @@ export function assertDesiredSnapshotComplete(
   for (const scope of POLICY_SCOPES) {
     const policy = desired.policies.get(scope);
     if (!policy) throw new Error(`Missing policy snapshot ${scope}`);
+    assertCascadingSets(policy.membersByTier, scope);
 
-    const seen = new Set<Address>();
     for (const tier of TIERS) {
-      for (const address of policy.membersByTier[tier]) {
-        if (seen.has(address)) {
-          throw new Error(`${scope} contains duplicate cross-tier membership`);
-        }
-        seen.add(address);
-      }
       if (
         !config.groups.some((group) => groupKey(group.scope, group.tier) === groupKey(scope, tier))
       ) {
@@ -115,33 +174,81 @@ export function assertDesiredSnapshotComplete(
   }
 }
 
+/**
+ * Validates the calculated snapshot without reference to on-chain state, so a
+ * bad calculation is caught even when the resulting diff happens to be small.
+ * The monotonicity check is deliberately redundant with assertCascadingSets —
+ * it is a cheap independent cross-check on the same invariant.
+ */
+export function assertDesiredSnapshotBounds(desired: DesiredSnapshot, config: GroupsConfig): void {
+  for (const scope of POLICY_SCOPES) {
+    const policy = desired.policies.get(scope);
+    if (!policy) throw new Error(`Missing policy snapshot ${scope}`);
+    const counts = tierCounts(policy);
+
+    for (const definition of config.groups.filter((group) => group.scope === scope)) {
+      const count = counts[definition.tier];
+      if (count < definition.minimumMembers) {
+        throw new Error(
+          `${scope}:${definition.tier} desired count ${count} is below minimumMembers ${definition.minimumMembers}`,
+        );
+      }
+      if (count > definition.maximumMembers) {
+        throw new Error(
+          `${scope}:${definition.tier} desired count ${count} exceeds maximumMembers ${definition.maximumMembers}`,
+        );
+      }
+    }
+
+    for (let index = TIERS.length - 1; index > 0; index -= 1) {
+      const higher = TIERS[index];
+      const lower = TIERS[index - 1];
+      if (!higher || !lower) continue;
+      if (counts[higher] > counts[lower]) {
+        throw new Error(
+          `${scope} tier counts are not monotonic: ${higher} ${counts[higher]} exceeds ${lower} ${counts[lower]}`,
+        );
+      }
+    }
+  }
+}
+
 export function assertPlanSafe(input: {
   plan: ReconciliationPlan;
+  phase: ReconciliationPhase;
   allowInitialSeed: boolean;
-  maxTotalAdds: number;
+  allowMigrationRemovals: boolean;
+  maxPlannedAdds: number;
   maxTotalRemovals: number;
+  maxRemovalWallets: number;
   maxRemovalBpsPerGroup: number;
 }): void {
   if (input.plan.initialSeed && !input.allowInitialSeed && input.plan.totalAdds > 0) {
     throw new Error("Initial seed requires ALLOW_INITIAL_SEED=true");
   }
-  if (input.plan.totalAdds > input.maxTotalAdds) {
+  if (input.plan.totalAdds > input.maxPlannedAdds) {
     throw new Error(
-      `Planned additions ${input.plan.totalAdds} exceed MAX_TOTAL_ADDS ${input.maxTotalAdds}`,
+      `Planned additions ${input.plan.totalAdds} exceed MAX_PLANNED_ADDS ${input.maxPlannedAdds}`,
     );
+  }
+
+  if (input.phase === "BACKFILL") return;
+
+  if (input.phase === "MIGRATION_REPAIR" && !input.allowMigrationRemovals) {
+    throw new Error("Migration repair requires ALLOW_MIGRATION_REMOVALS=true");
   }
   if (input.plan.totalRemovals > input.maxTotalRemovals) {
     throw new Error(
       `Planned removals ${input.plan.totalRemovals} exceed MAX_TOTAL_REMOVALS ${input.maxTotalRemovals}`,
     );
   }
+  if (input.plan.removalWalletCount > input.maxRemovalWallets) {
+    throw new Error(
+      `Removals affect ${input.plan.removalWalletCount} wallets, exceeding MAX_REMOVAL_WALLETS ${input.maxRemovalWallets}`,
+    );
+  }
 
   for (const group of input.plan.groups) {
-    if (group.desiredCount < group.definition.minimumMembers) {
-      throw new Error(
-        `${group.definition.scope}:${group.definition.tier} desired count ${group.desiredCount} is below minimumMembers ${group.definition.minimumMembers}`,
-      );
-    }
     if (group.currentCount === 0 || group.removals.length === 0) continue;
     const removalBps = Math.ceil((group.removals.length * 10_000) / group.currentCount);
     if (removalBps > input.maxRemovalBpsPerGroup) {

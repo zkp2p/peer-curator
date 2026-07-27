@@ -14,6 +14,7 @@ export interface GroupDefinition {
   tier: Tier;
   groupId: GroupId;
   minimumMembers: number;
+  maximumMembers: number;
 }
 
 export interface GroupsConfig {
@@ -76,9 +77,36 @@ export function tierCounts(snapshot: PolicySnapshot): Record<Tier, number> {
   };
 }
 
+/**
+ * Tier sets cascade, so a PRO member also appears in PLUS and PEER.
+ * Iterating ascending would report PEER for every curated wallet, so this
+ * walks the ladder downward and returns the highest tier actually held.
+ */
 export function tierForAddress(snapshot: PolicySnapshot, address: Address): Tier | "PEASANT" {
-  for (const tier of TIERS) {
-    if (snapshot.membersByTier[tier].has(address)) return tier;
+  for (let index = TIERS.length - 1; index >= 0; index -= 1) {
+    const tier = TIERS[index];
+    if (tier && snapshot.membersByTier[tier].has(address)) return tier;
   }
   return "PEASANT";
+}
+
+/**
+ * Tier membership is nested: every member of a tier must also belong to every
+ * lower tier. Throws on the first violation so a malformed snapshot can never
+ * reach the registry.
+ */
+export function assertCascadingSets(
+  membersByTier: Record<Tier, Set<Address>>,
+  label: string,
+): void {
+  for (let index = TIERS.length - 1; index > 0; index -= 1) {
+    const higher = TIERS[index];
+    const lower = TIERS[index - 1];
+    if (!higher || !lower) continue;
+    for (const address of membersByTier[higher]) {
+      if (!membersByTier[lower].has(address)) {
+        throw new Error(`${label} is not cascading: a ${higher} member is missing from ${lower}`);
+      }
+    }
+  }
 }

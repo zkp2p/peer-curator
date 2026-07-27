@@ -3,7 +3,13 @@ import { resolve } from "node:path";
 import type { Address } from "viem";
 import { calculateDesiredSnapshot } from "../src/calculate.js";
 import { loadSettings } from "../src/config.js";
-import { normalizeAddress, POLICY_SCOPES, type PolicyScope, TIERS } from "../src/domain.js";
+import {
+  normalizeAddress,
+  POLICY_SCOPES,
+  type PolicyScope,
+  TIERS,
+  type Tier,
+} from "../src/domain.js";
 
 const seedDirectory =
   process.argv.slice(2).find((argument) => argument !== "--") ?? process.env.LOCAL_SEED_DIR;
@@ -58,15 +64,29 @@ for (const scope of POLICY_SCOPES) {
   if (!snapshot) throw new Error(`Calculated snapshot omitted ${scope}`);
   const scopeDirectory = await findScopeDirectory(scope);
 
+  const exclusiveSeeds = {} as Record<Tier, Set<Address>>;
+  for (const tier of TIERS) {
+    const filename = resolve(scopeDirectory.path, `${tier.toLowerCase()}.txt`);
+    exclusiveSeeds[tier] = await readMemberFile(filename);
+  }
+  if (!scopeDirectory.alreadyThreeTier) {
+    const formerTopTier = await readMemberFile(resolve(scopeDirectory.path, "platinum.txt"));
+    for (const address of formerTopTier) exclusiveSeeds.PRO.add(address);
+  }
+
   const localUnion = new Set<Address>();
   const calculatedUnion = new Set<Address>();
   const tierResults = [];
 
-  for (const tier of TIERS) {
-    const local = await readMemberFile(resolve(scopeDirectory.path, `${tier.toLowerCase()}.txt`));
-    if (tier === "PRO" && !scopeDirectory.alreadyThreeTier) {
-      const formerTopTier = await readMemberFile(resolve(scopeDirectory.path, "platinum.txt"));
-      for (const address of formerTopTier) local.add(address);
+  for (let tierIndex = 0; tierIndex < TIERS.length; tierIndex += 1) {
+    const tier = TIERS[tierIndex];
+    if (!tier) throw new Error(`Tier missing at index ${tierIndex}`);
+
+    const local = new Set<Address>();
+    for (let cascadeIndex = tierIndex; cascadeIndex < TIERS.length; cascadeIndex += 1) {
+      const cascadeTier = TIERS[cascadeIndex];
+      if (!cascadeTier) throw new Error(`Tier missing at index ${cascadeIndex}`);
+      for (const address of exclusiveSeeds[cascadeTier]) local.add(address);
     }
     const current = snapshot.membersByTier[tier];
     for (const address of local) localUnion.add(address);
@@ -74,22 +94,22 @@ for (const scope of POLICY_SCOPES) {
 
     tierResults.push({
       tier,
-      local: local.size,
-      calculated: current.size,
-      overlap: local.size - countDifference(local, current),
-      calculatedOnly: countDifference(current, local),
-      localOnly: countDifference(local, current),
+      cumulativeLocal: local.size,
+      cumulativeCalculated: current.size,
+      cumulativeOverlap: local.size - countDifference(local, current),
+      cumulativeCalculatedOnly: countDifference(current, local),
+      cumulativeLocalOnly: countDifference(local, current),
     });
   }
 
   results.push({
     scope,
     summary: {
-      local: localUnion.size,
-      calculated: calculatedUnion.size,
-      overlap: localUnion.size - countDifference(localUnion, calculatedUnion),
-      calculatedOnly: countDifference(calculatedUnion, localUnion),
-      localOnly: countDifference(localUnion, calculatedUnion),
+      cumulativeLocal: localUnion.size,
+      cumulativeCalculated: calculatedUnion.size,
+      cumulativeOverlap: localUnion.size - countDifference(localUnion, calculatedUnion),
+      cumulativeCalculatedOnly: countDifference(calculatedUnion, localUnion),
+      cumulativeLocalOnly: countDifference(localUnion, calculatedUnion),
     },
     tiers: tierResults,
   });
