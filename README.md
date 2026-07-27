@@ -35,8 +35,9 @@ historical volume adds a wallet to Plus while it remains in Peer and Peasant.
 | Current Earn | any | $1,000 | $10,000 | $50,000+ | 100 / 400 / 1,000 / 2,000 |
 
 Because membership is cumulative, a promotion is adds-only — a wallet crossing a threshold is
-added to the higher group and stays in the lower ones. Removals happen only on lock-score
-demotion or denylisting.
+added to the higher group and stays in the lower ones. Removals happen on lock-score demotion,
+denylisting, a wallet leaving the scope's candidate set, or stale on-chain membership that no
+longer matches the calculation — the three categories `removalReasons` reports.
 
 ## Public means readable, not self-service
 
