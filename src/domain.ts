@@ -1,7 +1,10 @@
 import { type Address, type Hex, isAddress } from "viem";
 
-export const TIERS = ["PEER", "PLUS", "PRO"] as const;
+export const TIERS = ["PEASANT", "PEER", "PLUS", "PRO"] as const;
 export type Tier = (typeof TIERS)[number];
+
+export const NO_TIER = "NONE" as const;
+export type TierOrNone = Tier | typeof NO_TIER;
 
 export const POLICY_SCOPES = ["historical-taker", "current-earn"] as const;
 export type PolicyScope = (typeof POLICY_SCOPES)[number];
@@ -47,6 +50,7 @@ export function groupKey(scope: PolicyScope, tier: Tier): GroupKey {
 
 export function emptyTierSets(): Record<Tier, Set<Address>> {
   return {
+    PEASANT: new Set<Address>(),
     PEER: new Set<Address>(),
     PLUS: new Set<Address>(),
     PRO: new Set<Address>(),
@@ -71,6 +75,7 @@ export function normalizeGroupId(value: string, field = "groupId"): GroupId {
 
 export function tierCounts(snapshot: PolicySnapshot): Record<Tier, number> {
   return {
+    PEASANT: snapshot.membersByTier.PEASANT.size,
     PEER: snapshot.membersByTier.PEER.size,
     PLUS: snapshot.membersByTier.PLUS.size,
     PRO: snapshot.membersByTier.PRO.size,
@@ -78,16 +83,16 @@ export function tierCounts(snapshot: PolicySnapshot): Record<Tier, number> {
 }
 
 /**
- * Tier sets cascade, so a PRO member also appears in PLUS and PEER.
- * Iterating ascending would report PEER for every curated wallet, so this
+ * Tier sets cascade, so a PRO member also appears in PLUS, PEER and PEASANT.
+ * Iterating ascending would report PEASANT for every curated wallet, so this
  * walks the ladder downward and returns the highest tier actually held.
  */
-export function tierForAddress(snapshot: PolicySnapshot, address: Address): Tier | "PEASANT" {
+export function tierForAddress(snapshot: PolicySnapshot, address: Address): TierOrNone {
   for (let index = TIERS.length - 1; index >= 0; index -= 1) {
     const tier = TIERS[index];
     if (tier && snapshot.membersByTier[tier].has(address)) return tier;
   }
-  return "PEASANT";
+  return NO_TIER;
 }
 
 /**

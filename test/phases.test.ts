@@ -12,7 +12,7 @@ describe("findCurrentCascadeViolations", () => {
 
   it("detects a legacy exclusive member present only in a high tier", () => {
     const { config, onchain } = chainFixture();
-    onchain.membersByGroupId.set(groupId(3), new Set([addr("1")]));
+    onchain.membersByGroupId.set(groupId(4), new Set([addr("1")]));
 
     const violations = findCurrentCascadeViolations(config, onchain);
     expect(violations).toHaveLength(1);
@@ -44,7 +44,7 @@ describe("mutationsForPhase", () => {
   const plan = {
     groups: [],
     addMutations: [{ operation: "add" as const, groupId: groupId(1), members: [addr("1")] }],
-    removalMutations: [{ operation: "remove" as const, groupId: groupId(3), members: [addr("2")] }],
+    removalMutations: [{ operation: "remove" as const, groupId: groupId(4), members: [addr("2")] }],
     totalAdds: 1,
     totalRemovals: 1,
     deferredAdds: 0,

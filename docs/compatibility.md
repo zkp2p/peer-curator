@@ -6,7 +6,7 @@ Baseline reviewed on 2026-07-24.
 |---|---|---|
 | Contracts `origin/main` (`ce038e6c`) | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
 | Indexer tier aggregates | `TakerStats`, `MakerPlatformStats`, `MakerPeerPayStats` | preserved lock-score and frozen Earn fields used by the two policies |
-| Indexer current membership | `AddressGroup`, `AddressGroupMember` | all six groups enumerable, with `memberCount` equal to the matching member rows |
+| Indexer current membership | `AddressGroup`, `AddressGroupMember` | all eight groups enumerable, with `memberCount` equal to the matching member rows |
 | Indexer synchronization | `chain_metadata` | one valid processed-block watermark for chain 8453 |
 | Indexer environment config | `AddressGroupRegistry` source | a nonzero registry address bound in the matching environment |
 | Curator history | tier policy and blocked wallets | provenance only; there is no runtime Curator dependency |

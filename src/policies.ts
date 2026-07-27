@@ -64,7 +64,6 @@ export function classifyTier(
 }
 
 function addMember(snapshot: PolicySnapshot, tier: ComputedTier, address: Address): void {
-  if (tier === "PEASANT") return;
   const publicTier: Tier = tier === "TOP" ? "PRO" : tier;
   const highestIndex = TIERS.indexOf(publicTier);
   for (let index = 0; index <= highestIndex; index += 1) {

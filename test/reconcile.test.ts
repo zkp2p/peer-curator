@@ -17,10 +17,10 @@ describe("buildReconciliationPlan", () => {
     config.groups.reverse();
     const wallet = addr("1");
     const policy = desired.policies.get("historical-taker");
+    policy?.membersByTier.PEASANT.add(wallet);
     policy?.membersByTier.PEER.add(wallet);
-    policy?.membersByTier.PLUS.add(wallet);
-    onchain.membersByGroupId.set(groupId(2), new Set([addr("2")]));
     onchain.membersByGroupId.set(groupId(3), new Set([addr("2")]));
+    onchain.membersByGroupId.set(groupId(4), new Set([addr("2")]));
 
     const plan = buildReconciliationPlan({
       desired,
@@ -32,14 +32,14 @@ describe("buildReconciliationPlan", () => {
     const tierOf = (mutation: { groupId: string }) =>
       config.groups.find((group) => group.groupId === mutation.groupId)?.tier;
 
-    expect(plan.addMutations.map(tierOf)).toEqual(["PEER", "PLUS"]);
+    expect(plan.addMutations.map(tierOf)).toEqual(["PEASANT", "PEER"]);
     expect(plan.removalMutations.map(tierOf)).toEqual(["PRO", "PLUS"]);
   });
 
   it("truncates adds at the budget and reports the deferred remainder", () => {
     const { desired, config, onchain } = planFixture();
     const policy = desired.policies.get("historical-taker");
-    for (const digit of ["1", "2", "3"]) policy?.membersByTier.PEER.add(addr(digit));
+    for (const digit of ["1", "2", "3"]) policy?.membersByTier.PEASANT.add(addr(digit));
 
     const plan = buildReconciliationPlan({
       desired,
@@ -97,15 +97,15 @@ describe("buildReconciliationPlan", () => {
 
     expect(plan.deferredAdds).toBe(0);
     expect(runs).toBeLessThan(20);
-    for (let index = 1; index <= 3; index += 1) {
+    for (let index = 1; index <= 4; index += 1) {
       expect(onchain.membersByGroupId.get(groupId(index))?.size).toBe(3);
     }
   });
 
-  it("counts distinct wallets across six membership removals in both scopes", () => {
+  it("counts distinct wallets across eight membership removals in both scopes", () => {
     const { desired, config, onchain } = planFixture();
     const wallet = addr("1");
-    for (let id = 1; id <= 6; id += 1) onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
+    for (let id = 1; id <= 8; id += 1) onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
 
     const plan = buildReconciliationPlan({
       desired,
@@ -115,7 +115,7 @@ describe("buildReconciliationPlan", () => {
       addBudget: 100,
     });
 
-    expect(plan.totalRemovals).toBe(6);
+    expect(plan.totalRemovals).toBe(8);
     expect(plan.removalWalletCount).toBe(1);
   });
 });
@@ -127,7 +127,7 @@ describe("summarizeRemovalReasons", () => {
     const demoted = addr("2");
     const gone = addr("3");
     const policy = desired.policies.get("historical-taker");
-    policy?.membersByTier.PEER.add(demoted);
+    policy?.membersByTier.PEASANT.add(demoted);
 
     onchain.membersByGroupId.set(groupId(1), new Set([blocked, demoted, gone]));
     onchain.membersByGroupId.set(groupId(2), new Set([blocked, demoted, gone]));
@@ -166,7 +166,7 @@ describe("assertPlanSafe", () => {
 
   it("requires an explicit initial-seed gate", () => {
     const { plan, phase } = planFor((fixture) => {
-      fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(addr("1"));
+      fixture.desired.policies.get("historical-taker")?.membersByTier.PEASANT.add(addr("1"));
     });
 
     expect(() =>
@@ -183,9 +183,9 @@ describe("assertPlanSafe", () => {
   it("does not abort a real backfill run on pending removal-limit breaches", () => {
     const { plan, phase } = planFor((fixture) => {
       const policy = fixture.desired.policies.get("historical-taker");
-      for (const digit of ["1", "2", "3", "4", "5"]) policy?.membersByTier.PEER.add(addr(digit));
+      for (const digit of ["1", "2", "3", "4", "5"]) policy?.membersByTier.PEASANT.add(addr(digit));
       fixture.onchain.membersByGroupId.set(
-        groupId(3),
+        groupId(4),
         new Set([addr("6"), addr("7"), addr("8"), addr("9")]),
       );
     }, 2);
@@ -229,12 +229,12 @@ describe("assertPlanSafe", () => {
   it("limits distinct wallets affected by removals", () => {
     const { plan, phase } = planFor((fixture) => {
       const wallet = addr("1");
-      for (let id = 1; id <= 6; id += 1) {
+      for (let id = 1; id <= 8; id += 1) {
         fixture.onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
       }
     });
 
-    expect(plan.totalRemovals).toBe(6);
+    expect(plan.totalRemovals).toBe(8);
     expect(() =>
       assertPlanSafe({
         plan,
@@ -249,7 +249,7 @@ describe("assertPlanSafe", () => {
     ).toThrow("MAX_REMOVAL_WALLETS");
   });
 
-  it("rejects 101 PEER-only removals under the default global limit", () => {
+  it("rejects 101 PEASANT-only removals under the default global limit", () => {
     const { plan, phase } = planFor((fixture) => {
       const current = new Set(
         Array.from(
@@ -276,7 +276,7 @@ describe("assertPlanSafe", () => {
 
   it("gates a genuine migration repair behind an explicit approval", () => {
     const { plan, phase } = planFor((fixture) => {
-      fixture.onchain.membersByGroupId.set(groupId(3), new Set([addr("1")]));
+      fixture.onchain.membersByGroupId.set(groupId(4), new Set([addr("1")]));
     });
 
     expect(phase).toBe("MIGRATION_REPAIR");
@@ -294,7 +294,7 @@ describe("assertPlanSafe", () => {
   it("rejects a plan above the planned-add ceiling", () => {
     const { plan, phase } = planFor((fixture) => {
       const policy = fixture.desired.policies.get("historical-taker");
-      for (const digit of ["1", "2", "3"]) policy?.membersByTier.PEER.add(addr(digit));
+      for (const digit of ["1", "2", "3"]) policy?.membersByTier.PEASANT.add(addr(digit));
     });
 
     expect(() =>
@@ -316,7 +316,7 @@ describe("assertDesiredSnapshotBounds", () => {
     const definition = fixture.config.groups[0];
     if (!definition) throw new Error("fixture missing group");
     definition.minimumMembers = 2;
-    fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(addr("1"));
+    fixture.desired.policies.get("historical-taker")?.membersByTier.PEASANT.add(addr("1"));
 
     expect(() => assertDesiredSnapshotBounds(fixture.desired, fixture.config)).toThrow(
       "minimumMembers",
@@ -329,8 +329,8 @@ describe("assertDesiredSnapshotBounds", () => {
     if (!definition) throw new Error("fixture missing group");
     definition.maximumMembers = 1;
     const policy = fixture.desired.policies.get("historical-taker");
-    policy?.membersByTier.PEER.add(addr("1"));
-    policy?.membersByTier.PEER.add(addr("2"));
+    policy?.membersByTier.PEASANT.add(addr("1"));
+    policy?.membersByTier.PEASANT.add(addr("2"));
 
     expect(() => assertDesiredSnapshotBounds(fixture.desired, fixture.config)).toThrow(
       "maximumMembers",
@@ -339,7 +339,7 @@ describe("assertDesiredSnapshotBounds", () => {
 
   it("rejects non-monotonic cumulative counts", () => {
     const fixture = planFixture();
-    fixture.desired.policies.get("historical-taker")?.membersByTier.PLUS.add(addr("3"));
+    fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(addr("3"));
 
     expect(() => assertDesiredSnapshotBounds(fixture.desired, fixture.config)).toThrow(
       "not monotonic",

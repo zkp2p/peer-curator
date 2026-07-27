@@ -12,15 +12,16 @@ import {
 const address = (digit: string): Address => normalizeAddress(`0x${digit.repeat(40)}`);
 
 describe("tierForAddress", () => {
-  it("returns the highest tier held and PEASANT for outsiders", () => {
+  it("returns the highest tier held and NONE for outsiders", () => {
     const peer = address("1");
     const outsider = address("2");
     const membersByTier = emptyTierSets();
+    membersByTier.PEASANT.add(peer);
     membersByTier.PEER.add(peer);
     const snapshot = { scope: "historical-taker" as const, membersByTier, sourceRows: 1 };
 
     expect(tierForAddress(snapshot, peer)).toBe("PEER");
-    expect(tierForAddress(snapshot, outsider)).toBe("PEASANT");
+    expect(tierForAddress(snapshot, outsider)).toBe("NONE");
   });
 });
 
@@ -79,12 +80,24 @@ describe("historical taker policy", () => {
       isBlockedWallet: (candidate) => candidate === blocked,
     });
 
+    expect(snapshot.membersByTier.PEASANT).toEqual(new Set([peer, pro]));
     expect(snapshot.membersByTier.PEER).toEqual(new Set([peer, pro]));
     expect(snapshot.membersByTier.PLUS).toEqual(new Set([pro]));
     expect(snapshot.membersByTier.PRO).toEqual(new Set([pro]));
     expect([...Object.values(snapshot.membersByTier).flatMap((set) => [...set])]).not.toContain(
       blocked,
     );
+  });
+
+  it("places every classified wallet in PEASANT, including zero-volume rows", () => {
+    const empty = address("8");
+    const snapshot = calculateHistoricalTakerPolicy({
+      takerStats: [{ id: `8453_${empty}`, owner: empty, totalFulfilledVolume: 0n, lockScore: 0n }],
+      isBlockedWallet: () => false,
+    });
+
+    expect(snapshot.membersByTier.PEASANT).toEqual(new Set([empty]));
+    expect(snapshot.membersByTier.PEER.size).toBe(0);
   });
 
   it("keeps a lock-score demoted wallet cascading at its reduced tier", () => {
@@ -104,10 +117,11 @@ describe("historical taker policy", () => {
 
     expect(snapshot.membersByTier.PLUS).toEqual(new Set([demoted]));
     expect(snapshot.membersByTier.PEER).toEqual(new Set([demoted]));
+    expect(snapshot.membersByTier.PEASANT).toEqual(new Set([demoted]));
     expect(snapshot.membersByTier.PRO.size).toBe(0);
   });
 
-  it("excludes a blocked wallet from every curated tier", () => {
+  it("excludes a blocked wallet from every tier including the PEASANT floor", () => {
     const blocked = address("a");
     const snapshot = calculateHistoricalTakerPolicy({
       takerStats: [
@@ -174,6 +188,7 @@ describe("current Earn policy", () => {
       isBlockedWallet: (candidate) => candidate === blocked,
     });
 
+    expect(snapshot.membersByTier.PEASANT).toEqual(new Set([maker, peerPayOnly, topTier]));
     expect(snapshot.membersByTier.PEER).toEqual(new Set([maker, peerPayOnly, topTier]));
     expect(snapshot.membersByTier.PLUS).toEqual(new Set([maker, topTier]));
     expect(snapshot.membersByTier.PRO).toEqual(new Set([topTier]));

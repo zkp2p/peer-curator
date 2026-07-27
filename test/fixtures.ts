@@ -15,8 +15,8 @@ export const groupId = (value: number) =>
   normalizeGroupId(`0x${value.toString(16).padStart(64, "0")}`);
 
 /**
- * Six empty groups in TIERS order per scope, so groupId(1..3) is
- * historical-taker PEER/PLUS/PRO and groupId(4..6) is current-earn.
+ * Eight empty groups in TIERS order per scope, so groupId(1..4) is
+ * historical-taker PEASANT/PEER/PLUS/PRO and groupId(5..8) is current-earn.
  */
 export function chainFixture(): { config: GroupsConfig; onchain: RegistryState } {
   const groups = POLICY_SCOPES.flatMap((scope, scopeIndex) =>

@@ -20,13 +20,13 @@ function groupsFixture(): unknown {
 }
 
 describe("parseGroupsConfig", () => {
-  it("accepts a complete six-group manifest", () => {
-    expect(parseGroupsConfig(JSON.stringify(groupsFixture())).groups).toHaveLength(6);
+  it("accepts a complete eight-group manifest", () => {
+    expect(parseGroupsConfig(JSON.stringify(groupsFixture())).groups).toHaveLength(8);
   });
 
-  it("rejects an incomplete manifest", () => {
+  it("rejects a legacy six-group manifest", () => {
     const fixture = groupsFixture() as { groups: unknown[] };
-    fixture.groups = fixture.groups.slice(0, 5);
+    fixture.groups = fixture.groups.slice(0, 6);
     expect(() => parseGroupsConfig(JSON.stringify(fixture))).toThrow();
   });
 

@@ -1,6 +1,6 @@
 # Peer Curator
 
-Calculates and maintains two three-tier, cascading-membership policy families in
+Calculates and maintains two four-tier, cascading-membership policy families in
 `AddressGroupRegistry`:
 
 - `historical-taker`: the pre-Earn taker-volume tiers.
@@ -16,22 +16,23 @@ batches.
 
 The public groups are:
 
+- **Peasant** — everyone the indexer knows, including wallets with no volume.
 - **Peer** — established participation.
 - **Plus** — higher-volume participation.
 - **Pro** — the highest public cohort.
 
-**Group membership is cascading, not exclusive.** A Pro wallet is also written into Plus and
-Peer, so a consumer asking "is this wallet Peer or better?" makes a single
+**Group membership is cascading, not exclusive.** A Pro wallet is also written into Plus, Peer
+and Peasant, so a consumer asking "is this wallet Peer or better?" makes a single
 `members(peerGroupId, wallet)` call rather than OR-ing across groups. Higher tiers always carry
 lower-tier access.
 
 The volume bands below are therefore entry *floors*, not band populations. Crossing $2,000 of
-historical volume adds a wallet to Plus while it remains in Peer.
+historical volume adds a wallet to Plus while it remains in Peer and Peasant.
 
-| Scope | Peer | Plus | Pro | Lock-score thresholds |
-|---|---:|---:|---:|---|
-| Historical taker | $500 | $2,000 | $10,000+ | 50 / 200 / 500 / 1,000 |
-| Current Earn | $1,000 | $10,000 | $50,000+ | 100 / 400 / 1,000 / 2,000 |
+| Scope | Peasant | Peer | Plus | Pro | Lock-score thresholds |
+|---|---:|---:|---:|---:|---|
+| Historical taker | any | $500 | $2,000 | $10,000+ | 50 / 200 / 500 / 1,000 |
+| Current Earn | any | $1,000 | $10,000 | $50,000+ | 100 / 400 / 1,000 / 2,000 |
 
 Because membership is cumulative, a promotion is adds-only — a wallet crossing a threshold is
 added to the higher group and stays in the lower ones. Removals happen only on lock-score
@@ -39,7 +40,7 @@ demotion or denylisting.
 
 ## Public means readable, not self-service
 
-All six groups are created with `isPublic == false` and a curator equal to the signer.
+All eight groups are created with `isPublic == false` and a curator equal to the signer.
 
 "Public" in this project means publicly *readable* — any contract or service can call
 `members(groupId, wallet)`. It is not the registry's `isPublic` flag, which permits self-service
@@ -127,7 +128,7 @@ enforced only before phases that can execute removals, so a pending removal spik
 a safe add-only backfill.
 
 `MAX_REMOVAL_WALLETS` exists because the other removal limits count memberships, not people:
-under cascading, one denylisted Pro wallet produces three removals per scope.
+under cascading, one denylisted Pro wallet produces four removals per scope.
 
 `MAX_PLANNED_ADDS` is a hard abort ceiling; `MAX_EXECUTED_ADDS_PER_RUN` is a soft per-run budget
 that truncates and defers the remainder. Planned-add count depends on current chain state, so
@@ -174,7 +175,7 @@ pnpm calculate
 
 For `plan` or `sync`, copy `config/groups.example.json` to the untracked
 `config/groups.json`, then set the real registry address, deployment block,
-and six bytes32 group IDs. Group names are event-only in the contract, so this
+and eight bytes32 group IDs. Group names are event-only in the contract, so this
 file is the durable `(chainId, registryAddress, groupId)` manifest.
 
 Each group also carries `minimumMembers` and `maximumMembers`. These bound the *calculated*
@@ -219,7 +220,7 @@ set; a row is created on `MemberAdded` and deleted on `MemberRemoved`.
 For `plan` and `sync`, the service:
 
 1. Captures `chain_metadata.latest_processed_block`.
-2. Reads all desired-tier aggregates, the six `AddressGroup` rows, and every
+2. Reads all desired-tier aggregates, the eight `AddressGroup` rows, and every
    matching `AddressGroupMember` row.
 3. Reads the watermark again and requires it to be unchanged, preventing a
    reconciliation across two indexer states as far as the Envio/Hasura query
@@ -237,35 +238,35 @@ fallback.
 
 Recommended rollout:
 
-1. Confirm the indexer has an `AddressGroup` row and complete membership projection for all six
-   existing groups. This rollout creates no new groups; it migrates the existing groups from
-   exclusive to cascading membership.
-2. **Pause the cron.** Migration runs are manual and observed.
-3. Deploy the cascading code with the existing six-entry `config/groups.json`.
-4. Run `plan`. Review the `removalReasons` report; if it is non-empty, get that approved
+1. Create the two new PEASANT groups on-chain, `isPublic == false`, curator equal to the signer.
+2. Confirm the indexer has an `AddressGroup` row for both.
+3. **Pause the cron.** Migration runs are manual and observed.
+4. Deploy code and the eight-entry `config/groups.json` **together**. They are not
+   independently rollback-compatible: the previous binary requires exactly six group entries and
+   this one requires exactly eight, so a rollback must revert both.
+5. Run `plan`. Review the `removalReasons` report; if it is non-empty, get that approved
    separately before proceeding. Cascading membership is a superset of exclusive membership, so
-   the change to cascading does not by itself imply any removal. Removals can still legitimately
-   arise where the deployed state has diverged from current desired membership — lock-score
-   demotions since the last sync, denylist additions, a seed taken from an older snapshot, or
-   manual registry edits. `removalReasons` categorises them; every one still needs review.
-5. Run `sync` with `EXECUTE=true`.
-6. After each run, wait until the indexer watermark covers the last mined transaction's block
+   adding PEASANT does not by itself imply any removal. Removals can still legitimately arise
+   where the deployed state has diverged from current desired membership — lock-score demotions
+   since the last sync, denylist additions, a seed taken from an older snapshot, or manual
+   registry edits. `removalReasons` categorises them; every one still needs review.
+6. Seed with `ALLOW_INITIAL_SEED=true` and `EXECUTE=true`.
+7. After each run, wait until the indexer watermark covers the last mined transaction's block
    before replanning.
-7. Repeat until `plan` reports `deferredAdds: 0`.
-8. If the cascade preflight still fails, the run selects `MIGRATION_REPAIR`. Review the removals,
+8. Repeat until `plan` reports `deferredAdds: 0`.
+9. If the cascade preflight still fails, the run selects `MIGRATION_REPAIR`. Review the removals,
    set `ALLOW_MIGRATION_REMOVALS=true` for that run only, and return it to `false` immediately
    after. Repeat until `cascadeViolations` is empty.
 
-   `ALLOW_MIGRATION_REMOVALS` authorises the phase; it does not lift the removal limits.
-   `MAX_TOTAL_REMOVALS` (100), `MAX_REMOVAL_WALLETS` (50) and `MAX_REMOVAL_BPS_PER_GROUP` (500)
-   still abort the run independently. If a legitimate migration exceeds them, raise the specific
-   limit for that run rather than reaching for a larger blanket increase — the plan log reports
-   `totalRemovals` and `removalWalletCount` so you can tell which one is binding.
-9. Confirm `plan` reports `phase: NORMAL`, then resume the cron.
+    `ALLOW_MIGRATION_REMOVALS` authorises the phase; it does not lift the removal limits.
+    `MAX_TOTAL_REMOVALS` (100), `MAX_REMOVAL_WALLETS` (50) and `MAX_REMOVAL_BPS_PER_GROUP` (500)
+    still abort the run independently. If a legitimate migration exceeds them, raise the specific
+    limit for that run rather than reaching for a larger blanket increase — the plan log reports
+    `totalRemovals` and `removalWalletCount` so you can tell which one is binding.
+10. Confirm `plan` reports `phase: NORMAL`.
+11. Set `ALLOW_INITIAL_SEED=false` and resume the cron.
 
-Cascading the three tiers produces about 3,684 memberships (1,703 + 849 + 210 historical and
-638 + 219 + 65 current Earn), versus roughly 2,350 deployed exclusive memberships. The migration
-is therefore about 1,350 net adds, comfortably inside one run at the default
+Seeding an empty deployment writes ~15,500 memberships, which is about six runs at the default
 `MAX_EXECUTED_ADDS_PER_RUN=3000`. Measure the real diff rather than trusting that estimate.
 
 ## Recovery
@@ -287,10 +288,9 @@ logged transaction and wait. Rerunning early is safe but wastes gas.
 observed. Check the last `Registry transaction mined` line, confirm on-chain whether the next
 batch landed, then rerun.
 
-**Code rollback after cascading migration.** The previous binary accepts the same six-group
-manifest but calculates exclusive membership. Do not resume it in `sync` mode: it would plan
-removal of the newly added lower-tier memberships. Keep execution disabled until the cascading
-code is restored or an exclusive rollback plan is explicitly reviewed.
+**Code rollback after the eight-group manifest is installed.** The six-group binary rejects the
+eight-entry config at startup and the service will not run. Revert `config/groups.json` and the
+code together. The two extra on-chain groups are inert while unconfigured — nothing reads them.
 
 ## Cron deployment
 
@@ -312,7 +312,7 @@ New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
 This mode needs only the indexer and can run before the registry groups,
 membership projection, and group-curator signer are ready.
 
-After all six group IDs are recorded and the membership projection is
+After all eight group IDs are recorded and the membership projection is
 deployed and backfilled, move through `plan` before selecting `sync`. Keep
 `EXECUTE=false` until the generated plan is approved; `sync` only sends
 transactions when `EXECUTE=true`.

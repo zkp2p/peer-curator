@@ -29,6 +29,15 @@ async function readMemberFile(filename: string): Promise<Set<Address>> {
   );
 }
 
+async function readOptionalMemberFile(filename: string): Promise<Set<Address> | undefined> {
+  try {
+    return await readMemberFile(filename);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 async function findScopeDirectory(scope: PolicyScope): Promise<{
   path: string;
   alreadyThreeTier: boolean;
@@ -65,7 +74,9 @@ for (const scope of POLICY_SCOPES) {
   const scopeDirectory = await findScopeDirectory(scope);
 
   const seedFile = (tier: Tier) => resolve(scopeDirectory.path, `${tier.toLowerCase()}.txt`);
+  const peasantSeed = await readOptionalMemberFile(seedFile("PEASANT"));
   const exclusiveSeeds: Record<Tier, Set<Address>> = {
+    PEASANT: peasantSeed ?? new Set<Address>(),
     PEER: await readMemberFile(seedFile("PEER")),
     PLUS: await readMemberFile(seedFile("PLUS")),
     PRO: await readMemberFile(seedFile("PRO")),
@@ -105,6 +116,12 @@ for (const scope of POLICY_SCOPES) {
 
   results.push({
     scope,
+    ...(peasantSeed === undefined
+      ? {
+          peasantSeedMissing: true,
+          note: "PEASANT comparison is a lower bound because peasant.txt is missing; PEASANT-only wallets are omitted from the local seed.",
+        }
+      : {}),
     summary: {
       cumulativeLocal: localUnion.size,
       cumulativeCalculated: calculatedUnion.size,

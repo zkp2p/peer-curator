@@ -138,14 +138,14 @@ describe("exclusive to cascading migration", () => {
     const { desired, config, onchain } = planFixture();
     const wallet = addr("1");
     const policy = desired.policies.get("historical-taker");
+    policy?.membersByTier.PEASANT.add(wallet);
     policy?.membersByTier.PEER.add(wallet);
-    policy?.membersByTier.PEER.add(addr("2"));
 
     // Legacy exclusive state: PRO only.
-    onchain.membersByGroupId.set(groupId(3), new Set([wallet]));
+    onchain.membersByGroupId.set(groupId(4), new Set([wallet]));
 
-    // Run 1 — a budget of 1 leaves one PEER add deferred, so this is a genuine
-    // BACKFILL. With a budget large enough to schedule both PEER adds, deferredAdds
+    // Run 1 — a budget of 1 leaves the PEER add deferred, so this is a genuine
+    // BACKFILL. With a budget large enough to schedule both adds, deferredAdds
     // would be 0 and the very first run would select MIGRATION_REPAIR instead.
     const backfill = buildReconciliationPlan({
       desired,
@@ -205,8 +205,9 @@ describe("exclusive to cascading migration", () => {
   });
 
   it.each([
-    ["PRO to PEER", 3, ["PEER"] as const],
-    ["PLUS to PEER", 2, ["PEER"] as const],
+    ["PRO to PEER", 4, ["PEASANT", "PEER"] as const],
+    ["PRO to PEASANT", 4, ["PEASANT"] as const],
+    ["PLUS to PEER", 3, ["PEASANT", "PEER"] as const],
   ])("converges an exclusive %s transition", (_label, legacyGroup, desiredTiers) => {
     const { desired, config, onchain } = planFixture();
     const wallet = addr("1");
@@ -231,7 +232,7 @@ describe("exclusive to cascading migration", () => {
 
     expect(findCurrentCascadeViolations(config, onchain)).toEqual([]);
     const wanted: readonly string[] = desiredTiers;
-    for (let id = 1; id <= 3; id += 1) {
+    for (let id = 1; id <= 4; id += 1) {
       const tier = TIERS[id - 1];
       const expected = tier ? wanted.includes(tier) : false;
       expect(onchain.membersByGroupId.get(groupId(id))?.has(wallet) ?? false).toBe(expected);
@@ -239,14 +240,15 @@ describe("exclusive to cascading migration", () => {
   });
 
   it.each([
-    ["PRO to PEER", 3],
-    ["PLUS to PEER", 2],
+    ["PRO to PEER", 4],
+    ["PLUS to PEER", 3],
   ])(
     "keeps an interrupted %s migration non-worsening and convergent at every batch boundary",
     (_label, legacyGroup) => {
-      for (let stopAfter = 0; stopAfter <= 2; stopAfter += 1) {
+      for (let stopAfter = 0; stopAfter <= 3; stopAfter += 1) {
         const fixture = planFixture();
         const wallet = addr("1");
+        fixture.desired.policies.get("historical-taker")?.membersByTier.PEASANT.add(wallet);
         fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(wallet);
         fixture.onchain.membersByGroupId.set(groupId(legacyGroup), new Set([wallet]));
 
@@ -262,7 +264,7 @@ describe("exclusive to cascading migration", () => {
         });
         expect(phase).toBe("MIGRATION_REPAIR");
         const selected = mutationsForPhase(plan, phase);
-        expect(selected).toHaveLength(2);
+        expect(selected).toHaveLength(3);
 
         let appliedAddBatches = 0;
         let previousViolations = violationCount(fixture);
@@ -289,8 +291,9 @@ describe("exclusive to cascading migration", () => {
     for (let stopAfter = 0; stopAfter <= 2; stopAfter += 1) {
       const fixture = planFixture();
       const wallet = addr("1");
+      fixture.desired.policies.get("historical-taker")?.membersByTier.PEASANT.add(wallet);
       fixture.desired.policies.get("historical-taker")?.membersByTier.PEER.add(wallet);
-      for (let id = 1; id <= 3; id += 1) {
+      for (let id = 1; id <= 4; id += 1) {
         fixture.onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
       }
 

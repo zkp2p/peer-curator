@@ -145,7 +145,7 @@ describe("executeMutations transaction reporting", () => {
   const mutations = [
     { operation: "add" as const, groupId: groupId(1), members: [addr("1")] },
     { operation: "add" as const, groupId: groupId(2), members: [addr("1")] },
-    { operation: "remove" as const, groupId: groupId(3), members: [addr("2")] },
+    { operation: "remove" as const, groupId: groupId(4), members: [addr("2")] },
   ];
 
   it("reports every confirmed hash before a later revert", async () => {
