@@ -1,6 +1,14 @@
 import type { Address } from "viem";
 import { describe, expect, it } from "vitest";
-import { emptyTierSets, normalizeAddress, TIERS, tierForAddress } from "../src/domain.js";
+import { applyPinnedMembers } from "../src/calculate.js";
+import {
+  type DesiredSnapshot,
+  emptyTierSets,
+  normalizeAddress,
+  type PolicySnapshot,
+  TIERS,
+  tierForAddress,
+} from "../src/domain.js";
 import {
   CURRENT_EARN_POLICY,
   calculateCurrentEarnPolicy,
@@ -21,6 +29,61 @@ describe("tierForAddress", () => {
 
     expect(tierForAddress(snapshot, peer)).toBe("PEER");
     expect(tierForAddress(snapshot, outsider)).toBe("PEASANT");
+  });
+});
+
+describe("pinned members", () => {
+  it("adds a pinned Pro wallet to every lower tier in only the selected scope", () => {
+    const pinned = address("8");
+    const historical: PolicySnapshot = {
+      scope: "historical-taker" as const,
+      membersByTier: emptyTierSets(),
+      sourceRows: 0,
+    };
+    const earn: PolicySnapshot = {
+      scope: "current-earn" as const,
+      membersByTier: emptyTierSets(),
+      sourceRows: 0,
+    };
+    const desired: DesiredSnapshot = {
+      policies: new Map([
+        [historical.scope, historical],
+        [earn.scope, earn],
+      ]),
+      blockedWalletCount: 0,
+      calculatedAt: "2026-07-28T00:00:00.000Z",
+    };
+
+    applyPinnedMembers(
+      desired,
+      [{ scope: "historical-taker", tier: "PRO", address: pinned }],
+      () => false,
+    );
+
+    for (const tier of TIERS) expect(historical.membersByTier[tier]).toContain(pinned);
+    for (const tier of TIERS) expect(earn.membersByTier[tier]).not.toContain(pinned);
+  });
+
+  it("refuses to override the blocked-wallet policy", () => {
+    const pinned = address("a");
+    const historical: PolicySnapshot = {
+      scope: "historical-taker" as const,
+      membersByTier: emptyTierSets(),
+      sourceRows: 0,
+    };
+    const desired: DesiredSnapshot = {
+      policies: new Map([[historical.scope, historical]]),
+      blockedWalletCount: 1,
+      calculatedAt: "2026-07-28T00:00:00.000Z",
+    };
+
+    expect(() =>
+      applyPinnedMembers(
+        desired,
+        [{ scope: "historical-taker", tier: "PEER", address: pinned }],
+        () => true,
+      ),
+    ).toThrow("blocked wallet");
   });
 });
 
