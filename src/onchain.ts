@@ -120,6 +120,11 @@ export async function executeMutations<
   onTransaction?: (hash: `0x${string}`, mutation: GroupMutation) => void;
 }): Promise<`0x${string}`[]> {
   const transactionHashes: `0x${string}`[] = [];
+  if (input.mutations.length === 0) return transactionHashes;
+  let nextNonce = await input.publicClient.getTransactionCount({
+    address: input.account.address,
+    blockTag: "pending",
+  });
   for (const mutation of input.mutations) {
     let hash: `0x${string}`;
     if (mutation.operation === "add") {
@@ -129,6 +134,7 @@ export async function executeMutations<
         abi: addressGroupRegistryAbi,
         functionName: "addMembers",
         args: [mutation.groupId, mutation.members],
+        nonce: nextNonce,
       });
       hash = await input.walletClient.writeContract({
         account: input.account,
@@ -137,6 +143,7 @@ export async function executeMutations<
         abi: addressGroupRegistryAbi,
         functionName: "addMembers",
         args: [mutation.groupId, mutation.members],
+        nonce: nextNonce,
       });
     } else {
       await input.publicClient.simulateContract({
@@ -145,6 +152,7 @@ export async function executeMutations<
         abi: addressGroupRegistryAbi,
         functionName: "removeMembers",
         args: [mutation.groupId, mutation.members],
+        nonce: nextNonce,
       });
       hash = await input.walletClient.writeContract({
         account: input.account,
@@ -153,6 +161,7 @@ export async function executeMutations<
         abi: addressGroupRegistryAbi,
         functionName: "removeMembers",
         args: [mutation.groupId, mutation.members],
+        nonce: nextNonce,
       });
     }
     const receipt = await input.publicClient.waitForTransactionReceipt({
@@ -162,6 +171,7 @@ export async function executeMutations<
     if (receipt.status !== "success") {
       throw new Error(`Registry transaction reverted: ${hash}`);
     }
+    nextNonce += 1;
     transactionHashes.push(hash);
     input.onTransaction?.(hash, mutation);
   }

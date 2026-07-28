@@ -61,6 +61,7 @@ export async function run(
       calculatedAt: desired.calculatedAt,
       indexerAccess: settings.indexerApiKey ? "api-key" : "public-rate-limited",
       blockedWalletCount: desired.blockedWalletCount,
+      pinnedMemberCount: settings.pinnedMembers.length,
       policies: [...desired.policies.values()].map((policy) => ({
         scope: policy.scope,
         sourceRows: policy.sourceRows,

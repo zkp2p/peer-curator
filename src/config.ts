@@ -7,6 +7,7 @@ import {
   groupKey,
   normalizeAddress,
   normalizeGroupId,
+  type PinnedMember,
   POLICY_SCOPES,
   type PolicyScope,
   TIERS,
@@ -56,6 +57,7 @@ const envSchema = z.object({
   RPC_URL: z.string().optional(),
   GROUPS_CONFIG_PATH: z.string().default("config/groups.json"),
   GROUPS_CONFIG_JSON: z.string().optional(),
+  PINNED_MEMBERS_JSON: optionalNonEmptyString,
   EXECUTE: booleanFromString,
   GROUP_ADMIN_PRIVATE_KEY: z.preprocess(
     (value) => (value === "" ? undefined : value),
@@ -113,6 +115,7 @@ export interface RuntimeSettings {
   indexerApiKey?: string;
   rpcUrl?: string;
   groups?: GroupsConfig;
+  pinnedMembers: PinnedMember[];
   execute: boolean;
   groupAdminPrivateKey?: `0x${string}`;
   requireZeroResolver: boolean;
@@ -169,6 +172,33 @@ export function parseGroupsConfig(raw: string): GroupsConfig {
   return result;
 }
 
+const pinnedMembersSchema = z
+  .array(
+    z.object({
+      scope: z.enum(POLICY_SCOPES),
+      tier: z.enum(TIERS),
+      address: z.string(),
+    }),
+  )
+  .max(100);
+
+export function parsePinnedMembers(raw: string | undefined): PinnedMember[] {
+  if (!raw) return [];
+  const parsed = pinnedMembersSchema.parse(JSON.parse(raw));
+  const members = parsed.map((member) => ({
+    scope: member.scope as PolicyScope,
+    tier: member.tier as Tier,
+    address: normalizeAddress(member.address, "pinned member address"),
+  }));
+  const uniqueMembers = new Set(
+    members.map((member) => `${member.scope}:${member.tier}:${member.address}`),
+  );
+  if (uniqueMembers.size !== members.length) {
+    throw new Error("Pinned member configuration contains duplicate entries");
+  }
+  return members;
+}
+
 async function readGroupsConfig(
   inlineJson: string | undefined,
   path: string,
@@ -207,6 +237,7 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     ...(env.INDEXER_API_KEY ? { indexerApiKey: env.INDEXER_API_KEY } : {}),
     ...(env.RPC_URL ? { rpcUrl: env.RPC_URL } : {}),
     ...(groups ? { groups } : {}),
+    pinnedMembers: parsePinnedMembers(env.PINNED_MEMBERS_JSON),
     execute: command === "sync" && env.EXECUTE,
     ...(env.GROUP_ADMIN_PRIVATE_KEY
       ? { groupAdminPrivateKey: env.GROUP_ADMIN_PRIVATE_KEY as `0x${string}` }

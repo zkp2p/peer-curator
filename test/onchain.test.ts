@@ -127,6 +127,7 @@ describe("executeMutations transaction reporting", () => {
   function stubClients(revertAt: number) {
     let index = 0;
     const publicClient = {
+      getTransactionCount: async () => 7,
       simulateContract: async () => ({}),
       waitForTransactionReceipt: async ({ hash }: { hash: string }) => ({
         status: hash === `0x${revertAt}` ? "reverted" : "success",
@@ -166,6 +167,39 @@ describe("executeMutations transaction reporting", () => {
     expect(seen).toEqual(["0x0", "0x1"]);
   });
 
+  it("pins the pending nonce once and increments it after each receipt", async () => {
+    const nonces: number[] = [];
+    let transactionCountReads = 0;
+    let index = 0;
+    const publicClient = {
+      getTransactionCount: async () => {
+        transactionCountReads += 1;
+        return 41;
+      },
+      simulateContract: async () => ({}),
+      waitForTransactionReceipt: async () => ({ status: "success" }),
+    };
+    const walletClient = {
+      writeContract: async ({ nonce }: { nonce: number }) => {
+        nonces.push(nonce);
+        const hash = `0x${index}`;
+        index += 1;
+        return hash;
+      },
+    };
+
+    await executeMutations({
+      publicClient: publicClient as never,
+      walletClient: walletClient as never,
+      account: { address: addr("f") } as never,
+      registryAddress: addr("f"),
+      mutations,
+    });
+
+    expect(transactionCountReads).toBe(1);
+    expect(nonces).toEqual([41, 42, 43]);
+  });
+
   it("stops at the failing boundary wherever it falls", async () => {
     for (const revertAt of [0, 1, 2]) {
       const seen: string[] = [];
@@ -190,6 +224,7 @@ describe("executeMutations transaction reporting", () => {
     const attempted: string[] = [];
     let index = 0;
     const publicClient = {
+      getTransactionCount: async () => 7,
       simulateContract: async () => ({}),
       waitForTransactionReceipt: async () => ({ status: "reverted" }),
     };

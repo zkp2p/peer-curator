@@ -29,6 +29,10 @@ export interface TieredMember {
   tier: Tier;
 }
 
+export interface PinnedMember extends TieredMember {
+  scope: PolicyScope;
+}
+
 export interface PolicySnapshot {
   scope: PolicyScope;
   membersByTier: Record<Tier, Set<Address>>;

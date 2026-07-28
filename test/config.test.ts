@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseGroupsConfig } from "../src/config.js";
+import { parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
 
 function groupsFixture(): unknown {
@@ -45,5 +45,37 @@ describe("parseGroupsConfig", () => {
     second.scope = first.scope;
     second.tier = first.tier;
     expect(() => parseGroupsConfig(JSON.stringify(fixture))).toThrow("duplicate scope/tier");
+  });
+});
+
+describe("parsePinnedMembers", () => {
+  it("normalizes valid scope and tier pins", () => {
+    expect(
+      parsePinnedMembers(
+        JSON.stringify([
+          {
+            scope: "historical-taker",
+            tier: "PRO",
+            address: `0x${"A".repeat(40)}`,
+          },
+        ]),
+      ),
+    ).toEqual([
+      {
+        scope: "historical-taker",
+        tier: "PRO",
+        address: `0x${"a".repeat(40)}`,
+      },
+    ]);
+  });
+
+  it("rejects duplicate and invalid pins", () => {
+    const pin = {
+      scope: "current-earn",
+      tier: "PEER",
+      address: `0x${"b".repeat(40)}`,
+    };
+    expect(() => parsePinnedMembers(JSON.stringify([pin, pin]))).toThrow("duplicate");
+    expect(() => parsePinnedMembers(JSON.stringify([{ ...pin, tier: "TOP" }]))).toThrow();
   });
 });

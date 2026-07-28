@@ -75,6 +75,27 @@ comparison, and review the diff before deployment.
 `pnpm hash-wallets -- /path/to/wallets.txt` converts a newline-delimited or
 JSON source file to sorted hashes without printing the source wallets.
 
+## Test-environment pinned members
+
+`PINNED_MEMBERS_JSON` optionally adds reviewed test wallets to the desired
+snapshot. It is empty by default and should remain empty in production. Each
+entry identifies one policy scope, the highest tier to grant, and a wallet:
+
+```json
+[
+  {
+    "scope": "historical-taker",
+    "tier": "PRO",
+    "address": "0x0000000000000000000000000000000000000001"
+  }
+]
+```
+
+Pins use the same cascading semantics as calculated membership, so a pinned
+Pro wallet is also desired in Plus and Peer. A blocked wallet cannot be pinned.
+The service logs only the number of configured pins, never their addresses.
+Removing a pin returns that wallet to the calculated policy on the next sync.
+
 ## Safety model
 
 - Cascading groups: a member of a tier belongs to every lower tier in the same policy family.
