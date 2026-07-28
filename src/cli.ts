@@ -2,7 +2,7 @@
 
 import { z } from "zod";
 import { loadSettings } from "./config.js";
-import { createLogger } from "./logger.js";
+import { createLogger, summarizeError } from "./logger.js";
 import { runWithSnapshotRetries } from "./runner.js";
 
 const command = z
@@ -15,14 +15,6 @@ try {
   const verifyAddress = process.argv.slice(3).find((argument) => argument !== "--");
   await runWithSnapshotRetries(settings, logger, verifyAddress);
 } catch (error) {
-  logger.fatal(
-    {
-      error:
-        error instanceof Error
-          ? { name: error.name, message: error.message, stack: error.stack }
-          : { message: "Unknown failure" },
-    },
-    "Taker group reconciliation failed closed",
-  );
+  logger.fatal({ error: summarizeError(error) }, "Taker group reconciliation failed closed");
   process.exitCode = 1;
 }
