@@ -5,8 +5,8 @@ Baseline reviewed on 2026-07-24.
 | Producer | Surface | Requirement |
 |---|---|---|
 | Contracts `origin/main` (`ce038e6c`) | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
-| Indexer tier aggregates | `TakerStats`, `MakerPlatformStats`, `MakerPeerPayStats` | preserved lock-score and frozen Earn fields used by the two policies |
-| Indexer current membership | `AddressGroup`, `AddressGroupMember` | all six groups enumerable, with `memberCount` equal to the matching member rows |
+| Indexer tier aggregates | `TakerStats` | lifetime fulfilled volume and lock score used by the historical-taker policy |
+| Indexer current membership | `AddressGroup`, `AddressGroupMember` | all three groups enumerable, with `memberCount` equal to the matching member rows |
 | Indexer synchronization | `chain_metadata` | one valid processed-block watermark for chain 8453 |
 | Indexer environment config | `AddressGroupRegistry` source | a nonzero registry address bound in the matching environment |
 | Curator history | tier policy and blocked wallets | provenance only; there is no runtime Curator dependency |
@@ -40,6 +40,5 @@ the next scheduled run retries from a new stable state.
 RPC remains the source for pinned contract governance, simulation, writes, and
 receipts. It is not used to enumerate members or scan logs.
 
-Do not silently drop lock-score penalties, change the frozen Earn volume
-formula, accept decimal group IDs, or refresh blocked-wallet hashes without
-reviewed provenance.
+Do not silently drop lock-score penalties, accept decimal group IDs, or refresh
+blocked-wallet hashes without reviewed provenance.

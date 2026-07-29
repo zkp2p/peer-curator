@@ -23,27 +23,6 @@
       "groupId": "0x0000000000000000000000000000000000000000000000000000000000000003",
       "minimumMembers": 165,
       "maximumMembers": 320
-    },
-    {
-      "scope": "current-earn",
-      "tier": "PEER",
-      "groupId": "0x0000000000000000000000000000000000000000000000000000000000000004",
-      "minimumMembers": 500,
-      "maximumMembers": 960
-    },
-    {
-      "scope": "current-earn",
-      "tier": "PLUS",
-      "groupId": "0x0000000000000000000000000000000000000000000000000000000000000005",
-      "minimumMembers": 175,
-      "maximumMembers": 330
-    },
-    {
-      "scope": "current-earn",
-      "tier": "PRO",
-      "groupId": "0x0000000000000000000000000000000000000000000000000000000000000006",
-      "minimumMembers": 50,
-      "maximumMembers": 100
     }
   ]
 }

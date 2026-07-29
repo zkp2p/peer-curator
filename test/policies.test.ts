@@ -10,8 +10,6 @@ import {
   tierForAddress,
 } from "../src/domain.js";
 import {
-  CURRENT_EARN_POLICY,
-  calculateCurrentEarnPolicy,
   calculateHistoricalTakerPolicy,
   classifyTier,
   HISTORICAL_TAKER_POLICY,
@@ -33,23 +31,15 @@ describe("tierForAddress", () => {
 });
 
 describe("pinned members", () => {
-  it("adds a pinned Pro wallet to every lower tier in only the selected scope", () => {
+  it("adds a pinned Pro wallet to every lower tier", () => {
     const pinned = address("8");
     const historical: PolicySnapshot = {
       scope: "historical-taker" as const,
       membersByTier: emptyTierSets(),
       sourceRows: 0,
     };
-    const earn: PolicySnapshot = {
-      scope: "current-earn" as const,
-      membersByTier: emptyTierSets(),
-      sourceRows: 0,
-    };
     const desired: DesiredSnapshot = {
-      policies: new Map([
-        [historical.scope, historical],
-        [earn.scope, earn],
-      ]),
+      policies: new Map([[historical.scope, historical]]),
       blockedWalletCount: 0,
       calculatedAt: "2026-07-28T00:00:00.000Z",
     };
@@ -61,7 +51,6 @@ describe("pinned members", () => {
     );
 
     for (const tier of TIERS) expect(historical.membersByTier[tier]).toContain(pinned);
-    for (const tier of TIERS) expect(earn.membersByTier[tier]).not.toContain(pinned);
   });
 
   it("refuses to override the blocked-wallet policy", () => {
@@ -185,61 +174,5 @@ describe("historical taker policy", () => {
     });
 
     for (const tier of TIERS) expect(snapshot.membersByTier[tier].size).toBe(0);
-  });
-});
-
-describe("current Earn policy", () => {
-  it("aggregates frozen platform volume and post-cutover Peer Pay volume", () => {
-    const maker = address("4");
-    const peerPayOnly = address("5");
-    const blocked = address("6");
-    const topTier = address("7");
-    const snapshot = calculateCurrentEarnPolicy({
-      platformStats: [
-        {
-          id: `8453_${maker}_a`,
-          maker,
-          paymentMethodHash: "a",
-          totalAmountTakenPreEarnCutover: 6_000_000_000n,
-        },
-        {
-          id: `8453_${maker}_b`,
-          maker,
-          paymentMethodHash: "b",
-          totalAmountTakenPreEarnCutover: 5_000_000_000n,
-        },
-        {
-          id: `8453_${blocked}_a`,
-          maker: blocked,
-          paymentMethodHash: "a",
-          totalAmountTakenPreEarnCutover: 200_000_000_000n,
-        },
-        {
-          id: `8453_${topTier}_a`,
-          maker: topTier,
-          paymentMethodHash: "a",
-          totalAmountTakenPreEarnCutover: 100_000_000_000n,
-        },
-      ],
-      peerPayStats: [
-        {
-          id: `8453_${maker}`,
-          maker,
-          ppTakenPostEarnCutover: 1_000_000_000n,
-        },
-        {
-          id: `8453_${peerPayOnly}`,
-          maker: peerPayOnly,
-          ppTakenPostEarnCutover: 1_000_000_000n,
-        },
-      ],
-      takerStats: [],
-      isBlockedWallet: (candidate) => candidate === blocked,
-    });
-
-    expect(snapshot.membersByTier.PEER).toEqual(new Set([maker, peerPayOnly, topTier]));
-    expect(snapshot.membersByTier.PLUS).toEqual(new Set([maker, topTier]));
-    expect(snapshot.membersByTier.PRO).toEqual(new Set([topTier]));
-    expect(classifyTier(100_000_000_000n, 0n, 0n, CURRENT_EARN_POLICY)).toBe("TOP");
   });
 });

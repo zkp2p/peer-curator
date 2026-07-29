@@ -1,10 +1,8 @@
 # Peer Curator
 
-Calculates and maintains two three-tier, cascading-membership policy families in
-`AddressGroupRegistry`:
-
-- `historical-taker`: the pre-Earn taker-volume tiers.
-- `current-earn`: the frozen Earn qualification tiers.
+Calculates and maintains the three-tier, cascading `historical-taker` policy
+family in `AddressGroupRegistry`. Current-Earn tiers are intentionally not
+calculated or reconciled.
 
 The service pulls production indexer aggregates, excludes wallets whose
 address hashes are in the committed denylist, calculates desired membership,
@@ -31,7 +29,6 @@ historical volume adds a wallet to Plus while it remains in Peer.
 | Scope | Peer | Plus | Pro | Lock-score thresholds |
 |---|---:|---:|---:|---|
 | Historical taker | $500 | $2,000 | $10,000+ | 50 / 200 / 500 / 1,000 |
-| Current Earn | $1,000 | $10,000 | $50,000+ | 100 / 400 / 1,000 / 2,000 |
 
 Because membership is cumulative, a promotion is adds-only — a wallet crossing a threshold is
 added to the higher group and stays in the lower ones. Removals happen only on lock-score
@@ -39,22 +36,15 @@ demotion or denylisting.
 
 ## Public means readable, not self-service
 
-All six groups are created with `isPublic == false` and a curator equal to the signer.
+All three groups are created with `isPublic == false` and a curator equal to the signer.
 
 "Public" in this project means publicly *readable* — any contract or service can call
 `members(groupId, wallet)`. It is not the registry's `isPublic` flag, which permits self-service
 membership and would let anyone add themselves. `assertRegistryGovernance` rejects any
 configured group with `isPublic == true`; do not weaken that check.
 
-Historical volume is `TakerStats.totalFulfilledVolume`. Current Earn volume is:
-
-```text
-sum(MakerPlatformStats.totalAmountTakenPreEarnCutover)
-+ MakerPeerPayStats.ppTakenPostEarnCutover
-```
-
-Both policies dilute `lockScore` by
-`max(TakerStats.totalFulfilledVolume, 250 USDC)` and demote one tier per crossed
+Historical volume is `TakerStats.totalFulfilledVolume`. The policy dilutes `lockScore` by
+`max(TakerStats.totalFulfilledVolume, 250 USDC)` and demotes one tier per crossed
 threshold. The preserved legacy calculation has an additional internal top
 band so lock-score demotions remain faithful, but that band is folded into the
 public Pro group. There are no address-specific tier overrides.
@@ -195,7 +185,7 @@ pnpm calculate
 
 For `plan` or `sync`, copy `config/groups.example.json` to the untracked
 `config/groups.json`, then set the real registry address, deployment block,
-and six bytes32 group IDs. Group names are event-only in the contract, so this
+and three bytes32 group IDs. Group names are event-only in the contract, so this
 file is the durable `(chainId, registryAddress, groupId)` manifest.
 
 Each group also carries `minimumMembers` and `maximumMembers`. These bound the *calculated*
@@ -240,7 +230,7 @@ set; a row is created on `MemberAdded` and deleted on `MemberRemoved`.
 For `plan` and `sync`, the service:
 
 1. Captures `chain_metadata.latest_processed_block`.
-2. Reads all desired-tier aggregates, the six `AddressGroup` rows, and every
+2. Reads all desired-tier aggregates, the three `AddressGroup` rows, and every
    matching `AddressGroupMember` row.
 3. Reads the watermark again and requires it to be unchanged, preventing a
    reconciliation across two indexer states as far as the Envio/Hasura query
@@ -258,22 +248,24 @@ fallback.
 
 Recommended rollout:
 
-1. Confirm the indexer has an `AddressGroup` row and complete membership projection for all six
-   existing groups. This rollout creates no new groups; it migrates the existing groups from
-   exclusive to cascading membership.
-2. **Pause the cron.** Migration runs are manual and observed.
-3. Deploy the cascading code with the existing six-entry `config/groups.json`.
-4. Run `plan`. Review the `removalReasons` report; if it is non-empty, get that approved
+1. Create the three historical-taker groups with the execution signer as curator, `isPublic=false`,
+   and a zero resolver.
+2. Confirm the indexer has an `AddressGroup` row and complete membership projection for all three
+   groups.
+3. **Pause the cron.** Initial seed and migration runs are manual and observed.
+4. Deploy the code with the three-entry `config/groups.json`.
+5. Run `plan`. Review the `removalReasons` report; if it is non-empty, get that approved
    separately before proceeding. Cascading membership is a superset of exclusive membership, so
    the change to cascading does not by itself imply any removal. Removals can still legitimately
    arise where the deployed state has diverged from current desired membership — lock-score
    demotions since the last sync, denylist additions, a seed taken from an older snapshot, or
    manual registry edits. `removalReasons` categorises them; every one still needs review.
-5. Run `sync` with `EXECUTE=true`.
-6. After each run, wait until the indexer watermark covers the last mined transaction's block
+6. For an empty registry, set `ALLOW_INITIAL_SEED=true` only for the approved first `sync` with
+   `EXECUTE=true`, then return it to `false`.
+7. After each run, wait until the indexer watermark covers the last mined transaction's block
    before replanning.
-7. Repeat until `plan` reports `deferredAdds: 0`.
-8. If the cascade preflight still fails, the run selects `MIGRATION_REPAIR`. Review the removals,
+8. Repeat until `plan` reports `deferredAdds: 0`.
+9. If the cascade preflight still fails, the run selects `MIGRATION_REPAIR`. Review the removals,
    set `ALLOW_MIGRATION_REMOVALS=true` for that run only, and return it to `false` immediately
    after. Repeat until `cascadeViolations` is empty.
 
@@ -282,12 +274,11 @@ Recommended rollout:
    still abort the run independently. If a legitimate migration exceeds them, raise the specific
    limit for that run rather than reaching for a larger blanket increase — the plan log reports
    `totalRemovals` and `removalWalletCount` so you can tell which one is binding.
-9. Confirm `plan` reports `phase: NORMAL`, then resume the cron.
+10. Confirm `plan` reports `phase: NORMAL`, then resume the cron.
 
-Cascading the three tiers produces about 3,684 memberships (1,703 + 849 + 210 historical and
-638 + 219 + 65 current Earn), versus roughly 2,350 deployed exclusive memberships. The migration
-is therefore about 1,350 net adds, comfortably inside one run at the default
-`MAX_EXECUTED_ADDS_PER_RUN=3000`. Measure the real diff rather than trusting that estimate.
+The historical policy produced 2,780 cumulative memberships in the latest validation, inside one
+run at the default `MAX_EXECUTED_ADDS_PER_RUN=3000`. Measure the real diff rather than trusting
+that estimate.
 
 ## Recovery
 
@@ -308,10 +299,9 @@ logged transaction and wait. Rerunning early is safe but wastes gas.
 observed. Check the last `Registry transaction mined` line, confirm on-chain whether the next
 batch landed, then rerun.
 
-**Code rollback after cascading migration.** The previous binary accepts the same six-group
-manifest but calculates exclusive membership. Do not resume it in `sync` mode: it would plan
-removal of the newly added lower-tier memberships. Keep execution disabled until the cascading
-code is restored or an exclusive rollback plan is explicitly reviewed.
+**Code rollback after this hard cut.** The previous binary requires six groups and calculates
+Current-Earn membership. Do not resume it in `sync` mode. Keep execution disabled until the
+historical-only code is restored or a broader policy rollback is explicitly reviewed.
 
 ## Cron deployment
 
@@ -333,7 +323,7 @@ New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
 This mode needs only the indexer and can run before the registry groups,
 membership projection, and group-curator signer are ready.
 
-After all six group IDs are recorded and the membership projection is
+After all three group IDs are recorded and the membership projection is
 deployed and backfilled, move through `plan` before selecting `sync`. Keep
 `EXECUTE=false` until the generated plan is approved; `sync` only sends
 transactions when `EXECUTE=true`.
@@ -349,7 +339,7 @@ contracts or indexer.
 
 ## Known upstream drift
 
-The service requires the preserved tier aggregates plus `AddressGroup`,
+The service requires `TakerStats` plus `AddressGroup`,
 `AddressGroupMember`, `chain_metadata`, and an environment-specific nonzero
 registry binding. See [docs/compatibility.md](docs/compatibility.md).
 `pnpm check:upstream` fails if a required contract, schema, handler, or source

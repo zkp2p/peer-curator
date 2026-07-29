@@ -1,7 +1,7 @@
 import type { RuntimeSettings } from "./config.js";
 import { assertCascadingSets, type DesiredSnapshot, type PinnedMember, TIERS } from "./domain.js";
 import { IndexerClient } from "./indexer.js";
-import { calculateCurrentEarnPolicy, calculateHistoricalTakerPolicy } from "./policies.js";
+import { calculateHistoricalTakerPolicy } from "./policies.js";
 import { BLOCKED_WALLET_HASHES, isBlockedWallet } from "./staticWalletRules.js";
 
 export function applyPinnedMembers(
@@ -40,28 +40,14 @@ export async function calculateDesiredSnapshot(
       settings.requestTimeoutMs,
     );
 
-  const [takerStats, platformStats, peerPayStats] = await Promise.all([
-    indexer.getTakerStats(),
-    indexer.getMakerPlatformStats(),
-    indexer.getMakerPeerPayStats(),
-  ]);
+  const takerStats = await indexer.getTakerStats();
 
   const historical = calculateHistoricalTakerPolicy({
     takerStats,
     isBlockedWallet,
   });
-  const earn = calculateCurrentEarnPolicy({
-    platformStats,
-    peerPayStats,
-    takerStats,
-    isBlockedWallet,
-  });
-
   const desired: DesiredSnapshot = {
-    policies: new Map([
-      [historical.scope, historical],
-      [earn.scope, earn],
-    ]),
+    policies: new Map([[historical.scope, historical]]),
     blockedWalletCount: BLOCKED_WALLET_HASHES.length,
     calculatedAt: new Date().toISOString(),
   };
