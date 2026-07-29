@@ -184,13 +184,15 @@ pnpm calculate
 ```
 
 For `plan` or `sync`, copy `config/groups.example.json` to the untracked
-`config/groups.json`, then set the real registry address, deployment block,
-and three bytes32 group IDs. Group names are event-only in the contract, so this
-file is the durable `(chainId, registryAddress, groupId)` manifest.
+`config/groups.json`. The checked-in file contains the current production
+registry address, deployment block, and three historical-taker group IDs.
+Group names are event-only in the contract, so this file is the durable
+`(chainId, registryAddress, groupId)` manifest. Test environments can provide
+their own manifest through `GROUPS_CONFIG_JSON`.
 
 Each group also carries `minimumMembers` and `maximumMembers`. These bound the *calculated*
 count, not the on-chain count, so they catch a truncated or distorted indexer result before any
-transaction is built. The shipped example values bracket the counts measured on 2026-07-27;
+transaction is built. The shipped values bracket the counts measured on 2026-07-29;
 re-derive them if the population shifts materially.
 
 Runtime credentials:

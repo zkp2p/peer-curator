@@ -10,6 +10,9 @@ Validated 2026-07-29 with transaction execution disabled.
   handler, and both registry bindings are compatible.
 - Live preproduction-indexer calculation returned only `historical-taker`: 10,106 source rows;
   1,715 Peer, 855 Plus, and 210 Pro cumulative memberships.
+- The same preproduction indexer returned all three production `AddressGroup`
+  rows from registry `0x39F80118f9eB619135f116171b6Cb91D372C5AF2`,
+  with indexed member counts of 1,715 Peer, 855 Plus, and 210 Pro.
 - No Current-Earn aggregate was queried or calculated.
 
 ## Prior validation
@@ -76,15 +79,11 @@ Node 22 local: typecheck, 22 tests, coverage, build
 ```
 
 `pnpm check:upstream` confirms the latest contracts bytes32 ABI, current
-membership schema and handler, and the staging registry source binding. It
-currently exits nonzero for two explicit rollout gates: the tier aggregate
-surface is not yet restored on indexer `main`, and production has no nonzero
-registry source binding.
+membership schema and handler, and both staging and production registry source
+bindings.
 
-No production on-chain plan was run because its registry and three group IDs are
-not deployed. The current-membership consumer path is covered by mocked
-GraphQL tests for group coverage, bytes32 IDs, member enumeration, and
-`memberCount` parity. Snapshot tests cover a stable lagged watermark, indexer
-movement during reads, and insufficient RPC confirmations. Staging end-to-end
-parity is recorded separately after the indexer release is deployed and
-backfilled.
+No production on-chain plan or transaction execution was performed as part of
+this read-only manifest validation. The current-membership consumer path is
+covered by mocked GraphQL tests for group coverage, bytes32 IDs, member
+enumeration, and `memberCount` parity. Snapshot tests cover a stable lagged
+watermark, indexer movement during reads, and insufficient RPC confirmations.
