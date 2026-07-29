@@ -1,6 +1,6 @@
 # Producer compatibility
 
-Baseline reviewed on 2026-07-24.
+Baseline reviewed on 2026-07-29.
 
 | Producer | Surface | Requirement |
 |---|---|---|
@@ -14,8 +14,8 @@ Baseline reviewed on 2026-07-24.
 `pnpm check:upstream` inspects the fetched sibling repositories. Any missing
 runtime field, membership projection, handler mutation, bytes32 ABI surface, or
 environment registry binding is incompatible and makes the command exit
-nonzero. Production intentionally remains incompatible until its registry is
-deployed and bound.
+nonzero. The production registry is deployed, bound in the production indexer,
+and recorded in `config/groups.example.json`.
 
 ## Membership consistency contract
 

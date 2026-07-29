@@ -1,26 +1,26 @@
 {
   "chainId": 8453,
-  "registryAddress": "0x0000000000000000000000000000000000000000",
-  "registryDeploymentBlock": "0",
+  "registryAddress": "0x39F80118f9eB619135f116171b6Cb91D372C5AF2",
+  "registryDeploymentBlock": "49258233",
   "groups": [
     {
       "scope": "historical-taker",
       "tier": "PEER",
-      "groupId": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "groupId": "0x2fb4591ba225813e272f6c51e6e64edcfa21fff18ea2619726363a4f785c2c09",
       "minimumMembers": 1350,
       "maximumMembers": 2600
     },
     {
       "scope": "historical-taker",
       "tier": "PLUS",
-      "groupId": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "groupId": "0xb8747401b308d4891385620071b5916e9c61284f25c4611541c529703de5babf",
       "minimumMembers": 680,
       "maximumMembers": 1300
     },
     {
       "scope": "historical-taker",
       "tier": "PRO",
-      "groupId": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "groupId": "0xf030f72e772f954059ca28f94974088aaf6ba37bb1f264df48843a3d0c221dc3",
       "minimumMembers": 165,
       "maximumMembers": 320
     }

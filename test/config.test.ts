@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
@@ -20,6 +21,16 @@ function groupsFixture(): unknown {
 }
 
 describe("parseGroupsConfig", () => {
+  it("accepts the checked-in production manifest", () => {
+    const raw = readFileSync(new URL("../config/groups.example.json", import.meta.url), "utf8");
+    const config = parseGroupsConfig(raw);
+
+    expect(config.registryAddress).not.toBe("0x0000000000000000000000000000000000000000");
+    expect(config.registryDeploymentBlock).toBe(49_258_233n);
+    expect(config.groups).toHaveLength(3);
+    expect(config.groups.every((group) => !/^0x0+$/.test(group.groupId))).toBe(true);
+  });
+
   it("accepts a complete three-group manifest", () => {
     expect(parseGroupsConfig(JSON.stringify(groupsFixture())).groups).toHaveLength(3);
   });
