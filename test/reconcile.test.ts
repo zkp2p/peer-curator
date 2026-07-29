@@ -102,10 +102,10 @@ describe("buildReconciliationPlan", () => {
     }
   });
 
-  it("counts distinct wallets across six membership removals in both scopes", () => {
+  it("counts distinct wallets across all three membership removals", () => {
     const { desired, config, onchain } = planFixture();
     const wallet = addr("1");
-    for (let id = 1; id <= 6; id += 1) onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
+    for (let id = 1; id <= 3; id += 1) onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
 
     const plan = buildReconciliationPlan({
       desired,
@@ -115,7 +115,7 @@ describe("buildReconciliationPlan", () => {
       addBudget: 100,
     });
 
-    expect(plan.totalRemovals).toBe(6);
+    expect(plan.totalRemovals).toBe(3);
     expect(plan.removalWalletCount).toBe(1);
   });
 });
@@ -229,12 +229,12 @@ describe("assertPlanSafe", () => {
   it("limits distinct wallets affected by removals", () => {
     const { plan, phase } = planFor((fixture) => {
       const wallet = addr("1");
-      for (let id = 1; id <= 6; id += 1) {
+      for (let id = 1; id <= 3; id += 1) {
         fixture.onchain.membersByGroupId.set(groupId(id), new Set([wallet]));
       }
     });
 
-    expect(plan.totalRemovals).toBe(6);
+    expect(plan.totalRemovals).toBe(3);
     expect(() =>
       assertPlanSafe({
         plan,

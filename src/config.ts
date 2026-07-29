@@ -103,7 +103,7 @@ const groupFileSchema = z.object({
           message: "maximumMembers must be greater than or equal to minimumMembers",
         }),
     )
-    .length(6),
+    .length(3),
 });
 
 export type Command = "calculate" | "verify" | "plan" | "sync";

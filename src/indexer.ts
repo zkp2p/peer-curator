@@ -8,19 +8,6 @@ export interface TakerStatsRow {
   lockScore: bigint;
 }
 
-export interface MakerPlatformStatsRow {
-  id: string;
-  maker: Address;
-  paymentMethodHash: string;
-  totalAmountTakenPreEarnCutover: bigint;
-}
-
-export interface MakerPeerPayStatsRow {
-  id: string;
-  maker: Address;
-  ppTakenPostEarnCutover: bigint;
-}
-
 export interface IndexedMembershipSnapshot {
   membersByGroupId: Map<GroupId, Set<Address>>;
   snapshotBlock: bigint;
@@ -41,19 +28,6 @@ interface RawTakerStats {
   owner: string;
   totalFulfilledVolume: string;
   lockScore: string;
-}
-
-interface RawMakerPlatformStats {
-  id: string;
-  maker: string;
-  paymentMethodHash: string;
-  totalAmountTakenPreEarnCutover: string;
-}
-
-interface RawMakerPeerPayStats {
-  id: string;
-  maker: string;
-  ppTakenPostEarnCutover: string;
 }
 
 interface RawAddressGroup {
@@ -430,31 +404,6 @@ export class IndexerClient {
       owner: normalizeAddress(row.owner, "TakerStats.owner"),
       totalFulfilledVolume: BigInt(row.totalFulfilledVolume),
       lockScore: BigInt(row.lockScore),
-    }));
-  }
-
-  public async getMakerPlatformStats(): Promise<MakerPlatformStatsRow[]> {
-    const rows = await this.pageAll<RawMakerPlatformStats>(
-      "MakerPlatformStats",
-      "id maker paymentMethodHash totalAmountTakenPreEarnCutover",
-    );
-    return rows.map((row) => ({
-      id: row.id,
-      maker: normalizeAddress(row.maker, "MakerPlatformStats.maker"),
-      paymentMethodHash: row.paymentMethodHash.toLowerCase(),
-      totalAmountTakenPreEarnCutover: BigInt(row.totalAmountTakenPreEarnCutover),
-    }));
-  }
-
-  public async getMakerPeerPayStats(): Promise<MakerPeerPayStatsRow[]> {
-    const rows = await this.pageAll<RawMakerPeerPayStats>(
-      "MakerPeerPayStats",
-      "id maker ppTakenPostEarnCutover",
-    );
-    return rows.map((row) => ({
-      id: row.id,
-      maker: normalizeAddress(row.maker, "MakerPeerPayStats.maker"),
-      ppTakenPostEarnCutover: BigInt(row.ppTakenPostEarnCutover),
     }));
   }
 }

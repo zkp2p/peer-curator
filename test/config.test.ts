@@ -20,13 +20,21 @@ function groupsFixture(): unknown {
 }
 
 describe("parseGroupsConfig", () => {
-  it("accepts a complete six-group manifest", () => {
-    expect(parseGroupsConfig(JSON.stringify(groupsFixture())).groups).toHaveLength(6);
+  it("accepts a complete three-group manifest", () => {
+    expect(parseGroupsConfig(JSON.stringify(groupsFixture())).groups).toHaveLength(3);
   });
 
   it("rejects an incomplete manifest", () => {
     const fixture = groupsFixture() as { groups: unknown[] };
-    fixture.groups = fixture.groups.slice(0, 5);
+    fixture.groups = fixture.groups.slice(0, 2);
+    expect(() => parseGroupsConfig(JSON.stringify(fixture))).toThrow();
+  });
+
+  it("rejects a removed current-Earn group", () => {
+    const fixture = groupsFixture() as { groups: { scope: string }[] };
+    const first = fixture.groups[0];
+    if (!first) throw new Error("fixture missing group");
+    first.scope = "current-earn";
     expect(() => parseGroupsConfig(JSON.stringify(fixture))).toThrow();
   });
 
@@ -71,11 +79,25 @@ describe("parsePinnedMembers", () => {
 
   it("rejects duplicate and invalid pins", () => {
     const pin = {
-      scope: "current-earn",
+      scope: "historical-taker",
       tier: "PEER",
       address: `0x${"b".repeat(40)}`,
     };
     expect(() => parsePinnedMembers(JSON.stringify([pin, pin]))).toThrow("duplicate");
     expect(() => parsePinnedMembers(JSON.stringify([{ ...pin, tier: "TOP" }]))).toThrow();
+  });
+
+  it("rejects removed current-Earn pins", () => {
+    expect(() =>
+      parsePinnedMembers(
+        JSON.stringify([
+          {
+            scope: "current-earn",
+            tier: "PEER",
+            address: `0x${"b".repeat(40)}`,
+          },
+        ]),
+      ),
+    ).toThrow();
   });
 });

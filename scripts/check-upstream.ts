@@ -74,7 +74,6 @@ const contractSource = show(
   "origin/main",
   "contracts/registries/AddressGroupRegistry.sol",
 );
-const productionIndexerSchema = show(indexerRepo, "origin/releases/prod", "schema.graphql");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
 const mainIndexerProductionConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
 const mainIndexerStagingConfig = show(indexerRepo, "origin/main", "config.base_staging.yaml");
@@ -101,32 +100,14 @@ const runtimeChecks = [
   }),
   check({
     producer: "zkp2p-indexer",
-    ref: "origin/releases/prod",
-    surface: "tier aggregate schema",
-    content: productionIndexerSchema,
-    required: [
-      "lockScore: BigInt!",
-      "totalAmountTakenPreEarnCutover: BigInt!",
-      "type MakerPeerPayStats",
-      "ppTakenPostEarnCutover: BigInt!",
-    ],
-  }),
-];
-
-const forwardChecks = [
-  check({
-    producer: "zkp2p-indexer",
     ref: "origin/main",
     surface: "tier aggregate schema",
     content: mainIndexerSchema,
-    required: [
-      "lockScore: BigInt!",
-      "totalAmountTakenPreEarnCutover: BigInt!",
-      "type MakerPeerPayStats",
-      "ppTakenPostEarnCutover: BigInt!",
-    ],
+    required: ["type TakerStats", "totalFulfilledVolume: BigInt!", "lockScore: BigInt!"],
   }),
 ];
+
+const forwardChecks: SurfaceCheck[] = [];
 
 const membershipPrerequisiteChecks = [
   check({

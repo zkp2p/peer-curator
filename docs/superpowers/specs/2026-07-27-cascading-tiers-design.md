@@ -1,5 +1,10 @@
 # Design: Cascading address group tiers (zkp2p/peer-curator)
 
+> Superseded for Current Earn: the active runtime intentionally supports only
+> the `historical-taker` Peer/Plus/Pro groups. The Current-Earn material below
+> is retained solely as design history and must not be used as an active
+> deployment manifest.
+
 Status: implemented and merged (PR #2).
 Reviewed via Claude + Codex convergence, 3 rounds, converged.
 Production measurements taken 2026-07-27 against the live Base indexer.

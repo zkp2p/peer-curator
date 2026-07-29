@@ -3,7 +3,7 @@ import { type Address, type Hex, isAddress } from "viem";
 export const TIERS = ["PEER", "PLUS", "PRO"] as const;
 export type Tier = (typeof TIERS)[number];
 
-export const POLICY_SCOPES = ["historical-taker", "current-earn"] as const;
+export const POLICY_SCOPES = ["historical-taker"] as const;
 export type PolicyScope = (typeof POLICY_SCOPES)[number];
 
 export type GroupKey = `${PolicyScope}:${Tier}`;

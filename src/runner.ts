@@ -75,15 +75,11 @@ export async function run(
     if (!verifyAddress) throw new Error("verify requires a wallet address");
     const address = normalizeAddress(verifyAddress, "verification wallet");
     const historical = desired.policies.get("historical-taker");
-    const earn = desired.policies.get("current-earn");
-    if (!historical || !earn) throw new Error("Calculated policy snapshot is incomplete");
+    if (!historical) throw new Error("Calculated policy snapshot is incomplete");
     logger.info(
       {
         blocked: isBlockedWallet(address),
-        highestTier: {
-          historicalTaker: tierForAddress(historical, address),
-          currentEarn: tierForAddress(earn, address),
-        },
+        highestTier: tierForAddress(historical, address),
       },
       "Wallet tier verified",
     );
