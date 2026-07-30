@@ -34,6 +34,34 @@ export interface GroupMutation {
   members: Address[];
 }
 
+export async function loadRegistryGovernance<transport extends Transport>(
+  client: PublicClient<transport, typeof base>,
+  config: GroupsConfig,
+  blockNumber?: bigint,
+): Promise<Map<GroupId, GroupGovernance>> {
+  const uniqueGroupIds = [...new Set(config.groups.map((group) => group.groupId))];
+  const governanceRows = await Promise.all(
+    uniqueGroupIds.map(async (groupId): Promise<GroupGovernance> => {
+      const [curator, pendingCurator, resolver, isPublic, exists] = await client.readContract({
+        address: config.registryAddress,
+        abi: addressGroupRegistryAbi,
+        functionName: "getGroup",
+        args: [groupId],
+        ...(blockNumber !== undefined ? { blockNumber } : {}),
+      });
+      return {
+        groupId,
+        curator: normalizeAddress(curator),
+        pendingCurator: normalizeAddress(pendingCurator),
+        resolver: normalizeAddress(resolver),
+        isPublic,
+        exists,
+      };
+    }),
+  );
+  return new Map(governanceRows.map((row) => [row.groupId, row]));
+}
+
 export async function loadRegistryState<transport extends Transport>(
   client: PublicClient<transport, typeof base>,
   config: GroupsConfig,
@@ -53,30 +81,15 @@ export async function loadRegistryState<transport extends Transport>(
     throw new Error("AddressGroupRegistry has no deployed bytecode");
   }
 
-  const uniqueGroupIds = [...new Set(config.groups.map((group) => group.groupId))];
-  const governanceRows = await Promise.all(
-    uniqueGroupIds.map(async (groupId): Promise<GroupGovernance> => {
-      const [curator, pendingCurator, resolver, isPublic, exists] = await client.readContract({
-        address: config.registryAddress,
-        abi: addressGroupRegistryAbi,
-        functionName: "getGroup",
-        args: [groupId],
-        blockNumber: membership.snapshotBlock,
-      });
-      return {
-        groupId,
-        curator: normalizeAddress(curator),
-        pendingCurator: normalizeAddress(pendingCurator),
-        resolver: normalizeAddress(resolver),
-        isPublic,
-        exists,
-      };
-    }),
+  const governanceByGroupId = await loadRegistryGovernance(
+    client,
+    config,
+    membership.snapshotBlock,
   );
 
   return {
     membersByGroupId: membership.membersByGroupId,
-    governanceByGroupId: new Map(governanceRows.map((row) => [row.groupId, row])),
+    governanceByGroupId,
     snapshotBlock: membership.snapshotBlock,
     indexedThroughBlock: membership.indexedThroughBlock,
   };

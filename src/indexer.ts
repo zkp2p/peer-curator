@@ -1,4 +1,17 @@
+import { createHash } from "node:crypto";
 import type { Address, Hex } from "viem";
+import {
+  buildPinnedEventIdBounds,
+  type RawGroupCreatedEvent,
+  type RawMemberEvent,
+  type RawUnifiedIntentFulfilled,
+  type RawUnifiedIntentSignaled,
+  type RawV2IntentFulfilled,
+  type RawV2IntentSignaled,
+  reconstructMembership,
+  reconstructPlatformRows,
+  type V2HistoryEnvironment,
+} from "./blockPinnedSnapshot.js";
 import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 
@@ -13,6 +26,12 @@ export interface IndexedMembershipSnapshot {
   membersByGroupId: Map<GroupId, Set<Address>>;
   snapshotBlock: bigint;
   indexedThroughBlock: bigint;
+}
+
+export interface BlockPinnedReconciliationSnapshot {
+  takerPlatformStats: TakerPlatformStatsRow[];
+  membership: IndexedMembershipSnapshot;
+  evidenceDigest: Hex;
 }
 
 interface GraphQlError {
@@ -40,6 +59,13 @@ interface RawAddressGroup {
   memberCount: number;
 }
 
+interface RawAddressGroupBinding {
+  id: string;
+  chainId: number;
+  registryAddress: string;
+  groupId: string;
+}
+
 interface RawAddressGroupMember {
   id: string;
   chainId: number;
@@ -55,6 +81,11 @@ interface RawChainMetadata {
 }
 
 const PAGE_SIZE = 1_000;
+const MAX_V2_SIGNAL_ROWS = 25_000;
+const MAX_V2_FULFILLMENT_ROWS = 25_000;
+const MAX_UNIFIED_SIGNAL_ROWS = 100_000;
+const MAX_UNIFIED_FULFILLMENT_ROWS = 100_000;
+const MAX_GROUP_EVENT_ROWS = 10_000;
 const MAX_RETRIES = 5;
 const PUBLIC_REQUEST_INTERVAL_MS = 650;
 
@@ -183,6 +214,68 @@ export class IndexerClient {
     return data.AddressGroup;
   }
 
+  private async getGroupBindingRows(groupIds: GroupId[]): Promise<RawAddressGroupBinding[]> {
+    const query = `
+      query GroupRegistryBinding(
+        $chainId: Int!
+        $groupIds: [String!]!
+        $limit: Int!
+      ) {
+        AddressGroup(
+          where: {
+            chainId: { _eq: $chainId }
+            groupId: { _in: $groupIds }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          registryAddress
+          groupId
+        }
+      }
+    `;
+    const data = await this.query<{ AddressGroup: RawAddressGroupBinding[] }>(query, {
+      chainId: this.chainId,
+      groupIds,
+      limit: groupIds.length + 1,
+    });
+    if (!Array.isArray(data.AddressGroup)) {
+      throw new Error("Indexer response omitted the group registry binding");
+    }
+    return data.AddressGroup;
+  }
+
+  private assertGroupRegistryBinding(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    rows: RawAddressGroupBinding[];
+  }): void {
+    if (input.rows.length !== input.groupIds.length) {
+      throw new Error("Indexer group projection does not uniquely bind the configured registry");
+    }
+    const expectedGroupIds = new Set(input.groupIds);
+    const seenGroupIds = new Set<GroupId>();
+    for (const row of input.rows) {
+      const registryAddress = normalizeAddress(row.registryAddress, "AddressGroup.registryAddress");
+      const groupId = normalizeGroupId(row.groupId, "AddressGroup.groupId");
+      const expectedId = `${this.chainId}_${input.registryAddress}_${groupId}`;
+      if (
+        row.chainId !== this.chainId ||
+        registryAddress !== input.registryAddress ||
+        !expectedGroupIds.has(groupId) ||
+        row.id.toLowerCase() !== expectedId
+      ) {
+        throw new Error("Indexer group projection is bound to an unexpected registry");
+      }
+      if (seenGroupIds.has(groupId)) {
+        throw new Error("Indexer group projection contains a duplicate group binding");
+      }
+      seenGroupIds.add(groupId);
+    }
+  }
+
   private async getConfiguredAddressGroupMembers(input: {
     registryAddress: Address;
     groupIds: GroupId[];
@@ -240,12 +333,14 @@ export class IndexerClient {
     return rows;
   }
 
-  public async getAddressGroupMembershipSnapshot(input: {
+  private buildMembershipSnapshot(input: {
     registryAddress: Address;
     groupIds: GroupId[];
     deploymentBlock: bigint;
     snapshotBlock: bigint;
-  }): Promise<IndexedMembershipSnapshot> {
+    groups: RawAddressGroup[];
+    rawMembers: RawAddressGroupMember[];
+  }): IndexedMembershipSnapshot {
     const uniqueGroupIds = [...new Set(input.groupIds)];
     if (uniqueGroupIds.length === 0) {
       throw new Error("At least one address group is required");
@@ -254,23 +349,12 @@ export class IndexerClient {
       throw new Error("Registry deployment block is greater than the requested chain snapshot");
     }
 
-    const [groups, rawMembers] = await Promise.all([
-      this.getConfiguredAddressGroups({
-        registryAddress: input.registryAddress,
-        groupIds: uniqueGroupIds,
-      }),
-      this.getConfiguredAddressGroupMembers({
-        registryAddress: input.registryAddress,
-        groupIds: uniqueGroupIds,
-      }),
-    ]);
-
     const configuredIds = new Set<GroupId>(uniqueGroupIds);
     const indexedGroups = new Map<GroupId, RawAddressGroup>();
-    if (groups.length > configuredIds.size) {
+    if (input.groups.length > configuredIds.size) {
       throw new Error("Indexer returned an invalid configured group row count");
     }
-    for (const group of groups) {
+    for (const group of input.groups) {
       const registryAddress = normalizeAddress(
         group.registryAddress,
         "AddressGroup.registryAddress",
@@ -289,7 +373,7 @@ export class IndexerClient {
       }
       indexedGroups.set(groupId, group);
     }
-    if (indexedGroups.size !== groups.length) {
+    if (indexedGroups.size !== input.groups.length) {
       throw new Error("Indexer returned duplicate configured group rows");
     }
     if (
@@ -303,7 +387,7 @@ export class IndexerClient {
       uniqueGroupIds.map((groupId) => [groupId, new Set<Address>()]),
     );
     const seenIds = new Set<string>();
-    for (const row of rawMembers) {
+    for (const row of input.rawMembers) {
       if (!row.id || seenIds.has(row.id)) {
         throw new Error("Indexer returned a duplicate or invalid address-group member id");
       }
@@ -356,9 +440,40 @@ export class IndexerClient {
     };
   }
 
-  public async getTakerPlatformStats(
-    paymentMethodHashes: ReadonlySet<Hex>,
-  ): Promise<TakerPlatformStatsRow[]> {
+  public async getAddressGroupMembershipSnapshot(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    deploymentBlock: bigint;
+    snapshotBlock: bigint;
+  }): Promise<IndexedMembershipSnapshot> {
+    const uniqueGroupIds = [...new Set(input.groupIds)];
+    if (uniqueGroupIds.length === 0) {
+      throw new Error("At least one address group is required");
+    }
+    if (input.deploymentBlock > input.snapshotBlock) {
+      throw new Error("Registry deployment block is greater than the requested chain snapshot");
+    }
+
+    const [groups, rawMembers] = await Promise.all([
+      this.getConfiguredAddressGroups({
+        registryAddress: input.registryAddress,
+        groupIds: uniqueGroupIds,
+      }),
+      this.getConfiguredAddressGroupMembers({
+        registryAddress: input.registryAddress,
+        groupIds: uniqueGroupIds,
+      }),
+    ]);
+
+    return this.buildMembershipSnapshot({
+      ...input,
+      groupIds: uniqueGroupIds,
+      groups,
+      rawMembers,
+    });
+  }
+
+  private validatePaymentMethodHashes(paymentMethodHashes: ReadonlySet<Hex>): Hex[] {
     if (paymentMethodHashes.size === 0) {
       throw new Error("At least one chargebackable payment-method hash is required");
     }
@@ -370,6 +485,252 @@ export class IndexerClient {
     ) {
       throw new Error("Chargebackable payment-method hashes are invalid or unknown");
     }
+    return configuredHashes;
+  }
+
+  private parseTakerPlatformStatsRows(
+    rawRows: RawTakerPlatformStats[],
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): TakerPlatformStatsRow[] {
+    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
+      throw new Error("Indexer returned duplicate TakerPlatformStats rows");
+    }
+
+    const rows = rawRows.map((row) => {
+      const taker = normalizeAddress(row.taker, "TakerPlatformStats.taker");
+      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
+      if (
+        row.chainId !== this.chainId ||
+        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
+        !paymentMethodHashes.has(paymentMethodHash)
+      ) {
+        throw new Error("Indexer returned an unexpected TakerPlatformStats row");
+      }
+      const canonicalId = `${this.chainId}_${taker}_${paymentMethodHash}`;
+      if (row.id.toLowerCase() !== canonicalId) {
+        throw new Error("Indexer returned an invalid TakerPlatformStats id");
+      }
+      if (typeof row.totalAmountTaken !== "string" || !/^\d+$/.test(row.totalAmountTaken)) {
+        throw new Error("Indexer returned invalid TakerPlatformStats.totalAmountTaken");
+      }
+      const totalAmountTaken = BigInt(row.totalAmountTaken);
+      if (totalAmountTaken < 0n) {
+        throw new Error("Indexer returned negative TakerPlatformStats.totalAmountTaken");
+      }
+      return {
+        id: canonicalId,
+        taker,
+        paymentMethodHash,
+        totalAmountTaken,
+      };
+    });
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("Indexer returned duplicate canonical TakerPlatformStats rows");
+    }
+    return rows;
+  }
+
+  private async getPinnedEventRows<T extends { id: string }>(input: {
+    root: string;
+    selection: string;
+    snapshotBlock: bigint;
+    maximumRows: number;
+    additionalWhere?: string;
+    variables?: Record<string, unknown>;
+    variableDefinitions?: string;
+  }): Promise<T[]> {
+    const bounds = buildPinnedEventIdBounds(this.chainId, input.snapshotBlock);
+    const query = `
+      query PinnedEventPage(
+        $after: String!
+        $through: String!
+        $limit: Int!
+        ${input.variableDefinitions ?? ""}
+      ) {
+        rows: ${input.root}(
+          where: {
+            id: { _gt: $after, _lte: $through }
+            ${input.additionalWhere ?? ""}
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          ${input.selection}
+        }
+      }
+    `;
+    const rows: T[] = [];
+    let after = bounds.after;
+    for (;;) {
+      const data = await this.query<{ rows: T[] }>(query, {
+        after,
+        through: bounds.through,
+        limit: PAGE_SIZE,
+        ...input.variables,
+      });
+      const page = data.rows;
+      if (!Array.isArray(page)) {
+        throw new Error(`Indexer response omitted ${input.root}`);
+      }
+      let previousId = after;
+      for (const row of page) {
+        if (typeof row.id !== "string" || row.id <= previousId) {
+          throw new Error(`Indexer returned non-ascending ${input.root} event ids`);
+        }
+        previousId = row.id;
+      }
+      rows.push(...page);
+      if (rows.length > input.maximumRows) {
+        throw new Error(`${input.root} exceeds its block-snapshot safety limit`);
+      }
+      if (page.length < PAGE_SIZE) break;
+      const next = page.at(-1)?.id;
+      if (!next || next <= after) {
+        throw new Error(`Indexer pagination did not advance for ${input.root}`);
+      }
+      after = next;
+    }
+    return rows;
+  }
+
+  /**
+   * Reconstructs policy volume and group membership only from immutable event
+   * rows whose event ids are bounded by one explicit finalized Base block.
+   * Multiple GraphQL requests are safe because later indexing cannot mutate
+   * rows at or below the chosen block.
+   */
+  public async getBlockPinnedReconciliationSnapshot(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    deploymentBlock: bigint;
+    paymentMethodHashes: ReadonlySet<Hex>;
+    snapshotBlock: bigint;
+    v2Environment: V2HistoryEnvironment;
+  }): Promise<BlockPinnedReconciliationSnapshot> {
+    this.validatePaymentMethodHashes(input.paymentMethodHashes);
+    const uniqueGroupIds = [...new Set(input.groupIds)];
+    if (uniqueGroupIds.length === 0 || uniqueGroupIds.length !== input.groupIds.length) {
+      throw new Error("Address group ids must be non-empty and unique");
+    }
+    if (input.deploymentBlock > input.snapshotBlock) {
+      throw new Error("Registry deployment block is greater than the requested snapshot");
+    }
+
+    const [
+      v2Signals,
+      v2Fulfillments,
+      unifiedSignals,
+      unifiedFulfillments,
+      creations,
+      additions,
+      removals,
+      groupBindings,
+    ] = await Promise.all([
+      this.getPinnedEventRows<RawV2IntentSignaled>({
+        root: "Escrow_V2_IntentSignaled",
+        selection: "id intentHash verifier owner",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_SIGNAL_ROWS,
+      }),
+      this.getPinnedEventRows<RawV2IntentFulfilled>({
+        root: "Escrow_V2_IntentFulfilled",
+        selection: "id intentHash owner amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_FULFILLMENT_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedIntentSignaled>({
+        root: "Orchestrator_V21_IntentSignaled",
+        selection: "id intentHash paymentMethod owner",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedIntentFulfilled>({
+        root: "Orchestrator_V21_IntentFulfilled",
+        selection: "id intentHash amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_FULFILLMENT_ROWS,
+      }),
+      this.getPinnedEventRows<RawGroupCreatedEvent>({
+        root: "AddressGroupRegistry_GroupCreated",
+        selection: "id groupId",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: uniqueGroupIds.length,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberAdded",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberRemoved",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getGroupBindingRows(uniqueGroupIds),
+    ]);
+    this.assertGroupRegistryBinding({
+      registryAddress: input.registryAddress,
+      groupIds: uniqueGroupIds,
+      rows: groupBindings,
+    });
+
+    const evidenceDigest = `0x${createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshotBlock: input.snapshotBlock.toString(),
+          v2Signals,
+          v2Fulfillments,
+          unifiedSignals,
+          unifiedFulfillments,
+          creations,
+          additions,
+          removals,
+          groupBindings,
+        }),
+      )
+      .digest("hex")}` as Hex;
+
+    return {
+      evidenceDigest,
+      takerPlatformStats: reconstructPlatformRows({
+        chainId: this.chainId,
+        snapshotBlock: input.snapshotBlock,
+        v2Environment: input.v2Environment,
+        v2Signals,
+        v2Fulfillments,
+        unifiedSignals,
+        unifiedFulfillments,
+      }),
+      membership: {
+        membersByGroupId: reconstructMembership({
+          chainId: this.chainId,
+          snapshotBlock: input.snapshotBlock,
+          groupIds: uniqueGroupIds,
+          creations,
+          additions,
+          removals,
+        }),
+        snapshotBlock: input.snapshotBlock,
+        indexedThroughBlock: input.snapshotBlock,
+      },
+    };
+  }
+
+  public async getTakerPlatformStats(
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): Promise<TakerPlatformStatsRow[]> {
+    const configuredHashes = this.validatePaymentMethodHashes(paymentMethodHashes);
 
     const query = `
       query TakerPlatformStatsPage(
@@ -425,41 +786,6 @@ export class IndexerClient {
       after = next;
     }
 
-    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
-      throw new Error("Indexer returned duplicate TakerPlatformStats rows");
-    }
-
-    const rows = rawRows.map((row) => {
-      const taker = normalizeAddress(row.taker, "TakerPlatformStats.taker");
-      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
-      if (
-        row.chainId !== this.chainId ||
-        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
-        !paymentMethodHashes.has(paymentMethodHash)
-      ) {
-        throw new Error("Indexer returned an unexpected TakerPlatformStats row");
-      }
-      const canonicalId = `${this.chainId}_${taker}_${paymentMethodHash}`;
-      if (row.id.toLowerCase() !== canonicalId) {
-        throw new Error("Indexer returned an invalid TakerPlatformStats id");
-      }
-      if (typeof row.totalAmountTaken !== "string" || !/^\d+$/.test(row.totalAmountTaken)) {
-        throw new Error("Indexer returned invalid TakerPlatformStats.totalAmountTaken");
-      }
-      const totalAmountTaken = BigInt(row.totalAmountTaken);
-      if (totalAmountTaken < 0n) {
-        throw new Error("Indexer returned negative TakerPlatformStats.totalAmountTaken");
-      }
-      return {
-        id: canonicalId,
-        taker,
-        paymentMethodHash,
-        totalAmountTaken,
-      };
-    });
-    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
-      throw new Error("Indexer returned duplicate canonical TakerPlatformStats rows");
-    }
-    return rows;
+    return this.parseTakerPlatformStatsRows(rawRows, paymentMethodHashes);
   }
 }

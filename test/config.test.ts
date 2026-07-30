@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { V2_HISTORY_REGISTRY_BY_ENVIRONMENT } from "../src/blockPinnedSnapshot.js";
 import { loadSettings, parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
 
-function groupsFixture(): unknown {
+function groupsFixture(registryAddress: string = `0x${"f".repeat(40)}`): unknown {
   return {
     chainId: 8453,
-    registryAddress: `0x${"f".repeat(40)}`,
+    registryAddress,
     registryDeploymentBlock: "1",
     groups: POLICY_SCOPES.flatMap((scope, scopeIndex) =>
       TIERS.map((tier, tierIndex) => ({
@@ -25,6 +26,7 @@ afterEach(() => {
 
 describe("loadSettings", () => {
   it("applies the bounded addition limits when environment overrides are absent", async () => {
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", undefined);
     vi.stubEnv("MAX_PLANNED_ADDS", undefined);
     vi.stubEnv("MAX_EXECUTED_ADDS_PER_RUN", undefined);
 
@@ -32,6 +34,34 @@ describe("loadSettings", () => {
 
     expect(settings.maxPlannedAdds).toBe(1_500);
     expect(settings.maxExecutedAddsPerRun).toBe(1_000);
+    expect(settings.v2HistoryEnvironment).toBe("prod");
+  });
+
+  it("rejects a V2 history selector that mismatches the Railway environment", async () => {
+    vi.stubEnv("RAILWAY_ENVIRONMENT_NAME", "staging");
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", "prod");
+    await expect(loadSettings("plan")).rejects.toThrow("does not match the Railway environment");
+  });
+
+  it("requires a V2 history selector only for reconciliation commands", async () => {
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", undefined);
+    await expect(loadSettings("plan")).rejects.toThrow(
+      "V2_HISTORY_ENVIRONMENT is required for plan and sync",
+    );
+    await expect(loadSettings("calculate")).resolves.toMatchObject({
+      v2HistoryEnvironment: "prod",
+    });
+  });
+
+  it("rejects a V2 history selector that mismatches the configured registry", async () => {
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", "staging");
+    vi.stubEnv(
+      "GROUPS_CONFIG_JSON",
+      JSON.stringify(groupsFixture(V2_HISTORY_REGISTRY_BY_ENVIRONMENT.prod)),
+    );
+    await expect(loadSettings("plan")).rejects.toThrow(
+      "does not match the configured AddressGroupRegistry deployment",
+    );
   });
 });
 

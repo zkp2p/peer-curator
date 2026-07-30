@@ -1,12 +1,18 @@
 import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
-import { calculateDesiredSnapshot } from "./calculate.js";
+import { calculateDesiredSnapshot, calculateDesiredSnapshotFromRows } from "./calculate.js";
 import type { RuntimeSettings } from "./config.js";
 import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
-import { IndexerClient } from "./indexer.js";
+import { type BlockPinnedReconciliationSnapshot, IndexerClient } from "./indexer.js";
 import type { Logger } from "./logger.js";
-import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
+import {
+  assertRegistryGovernance,
+  executeMutations,
+  loadRegistryGovernance,
+  loadRegistryState,
+} from "./onchain.js";
+import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "./phases.js";
 import {
   assertDesiredSnapshotBounds,
@@ -17,27 +23,46 @@ import {
 } from "./reconcile.js";
 import { isBlockedWallet } from "./staticWalletRules.js";
 
-export class IndexerSnapshotAdvancedError extends Error {
-  public constructor() {
-    super("Indexer advanced while the reconciliation snapshot was being read");
-    this.name = "IndexerSnapshotAdvancedError";
-  }
-}
-
 export function assertPinnedIndexerSnapshot(input: {
   snapshotBlock: bigint;
-  finalIndexedBlock: bigint;
+  indexedThroughBlock: bigint;
   rpcLatestBlock: bigint;
   confirmationBlocks: bigint;
 }): void {
-  if (input.finalIndexedBlock !== input.snapshotBlock) {
-    throw new IndexerSnapshotAdvancedError();
+  if (input.snapshotBlock > input.indexedThroughBlock) {
+    throw new Error("Chosen snapshot block is ahead of the indexer watermark");
   }
   if (
     input.rpcLatestBlock < input.confirmationBlocks ||
     input.snapshotBlock > input.rpcLatestBlock - input.confirmationBlocks
   ) {
     throw new Error("Indexer snapshot is not sufficiently confirmed by RPC");
+  }
+}
+
+export function choosePinnedSnapshotBlock(input: {
+  indexedThroughBlock: bigint;
+  rpcLatestBlock: bigint;
+  confirmationBlocks: bigint;
+}): bigint {
+  if (input.rpcLatestBlock < input.confirmationBlocks) {
+    throw new Error("RPC head is below the required confirmation depth");
+  }
+  const confirmedRpcBlock = input.rpcLatestBlock - input.confirmationBlocks;
+  return input.indexedThroughBlock < confirmedRpcBlock
+    ? input.indexedThroughBlock
+    : confirmedRpcBlock;
+}
+
+export function assertMatchingSnapshotEvidence(
+  first: BlockPinnedReconciliationSnapshot,
+  second: BlockPinnedReconciliationSnapshot,
+): void {
+  if (
+    first.membership.snapshotBlock !== second.membership.snapshotBlock ||
+    first.evidenceDigest !== second.evidenceDigest
+  ) {
+    throw new Error("Indexer event evidence changed between block-pinned reconstruction passes");
   }
 }
 
@@ -53,8 +78,77 @@ export async function run(
     settings.requestTimeoutMs,
   );
   const reconciliationRun = settings.command === "plan" || settings.command === "sync";
-  const pinnedIndexerBlock = reconciliationRun ? await indexer.getIndexedThroughBlock() : undefined;
-  const desired = await calculateDesiredSnapshot(settings, indexer);
+  if (reconciliationRun && !settings.groups) {
+    throw new Error("Group configuration is required");
+  }
+
+  const publicClient =
+    reconciliationRun && settings.rpcUrl
+      ? createPublicClient({
+          chain: base,
+          transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
+        })
+      : undefined;
+  let rpcLatestBlock: bigint | undefined;
+  let indexedThroughBlock: bigint | undefined;
+  if (reconciliationRun) {
+    if (!publicClient) throw new Error("RPC_URL is required");
+    const rpcChainId = await publicClient.getChainId();
+    if (rpcChainId !== settings.chainId) {
+      throw new Error("RPC chain does not match CHAIN_ID");
+    }
+    [rpcLatestBlock, indexedThroughBlock] = await Promise.all([
+      publicClient.getBlockNumber(),
+      indexer.getIndexedThroughBlock(),
+    ]);
+  }
+  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
+  const snapshotBlock =
+    rpcLatestBlock !== undefined && indexedThroughBlock !== undefined
+      ? choosePinnedSnapshotBlock({
+          indexedThroughBlock,
+          rpcLatestBlock,
+          confirmationBlocks,
+        })
+      : undefined;
+  const pinnedSnapshotInput =
+    reconciliationRun && settings.groups && snapshotBlock !== undefined
+      ? {
+          registryAddress: settings.groups.registryAddress,
+          groupIds: settings.groups.groups.map((group) => group.groupId),
+          deploymentBlock: settings.groups.registryDeploymentBlock,
+          paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+          snapshotBlock,
+          v2Environment: settings.v2HistoryEnvironment,
+        }
+      : undefined;
+  let pinnedSnapshot = pinnedSnapshotInput
+    ? await indexer.getBlockPinnedReconciliationSnapshot(pinnedSnapshotInput)
+    : undefined;
+  if (pinnedSnapshot) {
+    const firstFinalIndexedThroughBlock = await indexer.getIndexedThroughBlock();
+    if (
+      indexedThroughBlock === undefined ||
+      firstFinalIndexedThroughBlock < pinnedSnapshot.membership.snapshotBlock
+    ) {
+      throw new Error("Indexer watermark fell below the chosen snapshot block");
+    }
+    if (!pinnedSnapshotInput) {
+      throw new Error("Block-pinned snapshot input is unavailable");
+    }
+    const verifiedSnapshot =
+      await indexer.getBlockPinnedReconciliationSnapshot(pinnedSnapshotInput);
+    const secondFinalIndexedThroughBlock = await indexer.getIndexedThroughBlock();
+    if (secondFinalIndexedThroughBlock < verifiedSnapshot.membership.snapshotBlock) {
+      throw new Error("Indexer watermark fell below the chosen snapshot block");
+    }
+    assertMatchingSnapshotEvidence(pinnedSnapshot, verifiedSnapshot);
+    pinnedSnapshot = verifiedSnapshot;
+    indexedThroughBlock = secondFinalIndexedThroughBlock;
+  }
+  const desired = pinnedSnapshot
+    ? calculateDesiredSnapshotFromRows(settings, pinnedSnapshot.takerPlatformStats)
+    : await calculateDesiredSnapshot(settings, indexer);
 
   logger.info(
     {
@@ -91,31 +185,18 @@ export async function run(
   const groups = settings.groups;
   assertDesiredSnapshotComplete(desired, groups);
   assertDesiredSnapshotBounds(desired, groups);
-  if (!settings.rpcUrl) throw new Error("RPC_URL is required");
-
-  const publicClient = createPublicClient({
-    chain: base,
-    transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
-  });
-  const rpcChainId = await publicClient.getChainId();
-  if (rpcChainId !== settings.chainId) {
-    throw new Error("RPC chain does not match CHAIN_ID");
+  if (
+    !publicClient ||
+    !pinnedSnapshot ||
+    rpcLatestBlock === undefined ||
+    indexedThroughBlock === undefined
+  ) {
+    throw new Error("Block-pinned reconciliation inputs are unavailable");
   }
-  if (pinnedIndexerBlock === undefined) {
-    throw new Error("Indexer snapshot block is unavailable");
-  }
-  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
-  const membership = await indexer.getAddressGroupMembershipSnapshot({
-    registryAddress: groups.registryAddress,
-    groupIds: groups.groups.map((group) => group.groupId),
-    deploymentBlock: groups.registryDeploymentBlock,
-    snapshotBlock: pinnedIndexerBlock,
-  });
-  const finalIndexerBlock = await indexer.getIndexedThroughBlock();
-  const rpcLatestBlock = await publicClient.getBlockNumber();
+  const membership = pinnedSnapshot.membership;
   assertPinnedIndexerSnapshot({
-    snapshotBlock: pinnedIndexerBlock,
-    finalIndexedBlock: finalIndexerBlock,
+    snapshotBlock: membership.snapshotBlock,
+    indexedThroughBlock,
     rpcLatestBlock,
     confirmationBlocks,
   });
@@ -159,7 +240,7 @@ export async function run(
     {
       rpcLatestBlock: rpcLatestBlock.toString(),
       snapshotBlock: onchain.snapshotBlock.toString(),
-      indexedThroughBlock: onchain.indexedThroughBlock.toString(),
+      indexedThroughBlock: indexedThroughBlock.toString(),
       phase,
       cascadeViolations,
       totalAdds: plan.totalAdds,
@@ -188,6 +269,26 @@ export async function run(
   if (!account || !settings.groupAdminPrivateKey) {
     throw new Error("Execution account is unavailable");
   }
+  const executionGovernanceBlock = await publicClient.getBlockNumber();
+  const executionGovernanceByGroupId = await loadRegistryGovernance(
+    publicClient,
+    groups,
+    executionGovernanceBlock,
+  );
+  assertRegistryGovernance({
+    config: groups,
+    state: {
+      ...onchain,
+      governanceByGroupId: executionGovernanceByGroupId,
+      snapshotBlock: executionGovernanceBlock,
+    },
+    requireZeroResolver: settings.requireZeroResolver,
+    signer: account,
+  });
+  logger.info(
+    { executionGovernanceBlock: executionGovernanceBlock.toString() },
+    "Current registry governance revalidated for execution",
+  );
 
   const walletClient = createWalletClient({
     account,
@@ -215,30 +316,4 @@ export async function run(
     { phase, transactionCount: transactionHashes.length },
     "On-chain group reconciliation completed",
   );
-}
-
-export async function runWithSnapshotRetries(
-  settings: RuntimeSettings,
-  logger: Logger,
-  verifyAddress?: string,
-  operation: typeof run = run,
-): Promise<void> {
-  for (let attempt = 1; attempt <= settings.snapshotMaxAttempts; attempt += 1) {
-    try {
-      await operation(settings, logger, verifyAddress);
-      return;
-    } catch (error) {
-      if (
-        !(error instanceof IndexerSnapshotAdvancedError) ||
-        attempt === settings.snapshotMaxAttempts
-      ) {
-        throw error;
-      }
-      logger.warn(
-        { attempt, maxAttempts: settings.snapshotMaxAttempts },
-        "Indexer advanced during snapshot; retrying the read-only reconciliation phase",
-      );
-      await new Promise((resolve) => setTimeout(resolve, settings.snapshotRetryDelayMs));
-    }
-  }
 }

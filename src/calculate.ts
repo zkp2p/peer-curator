@@ -1,6 +1,6 @@
 import type { RuntimeSettings } from "./config.js";
 import { assertCascadingSets, type DesiredSnapshot, type PinnedMember, TIERS } from "./domain.js";
-import { IndexerClient } from "./indexer.js";
+import { IndexerClient, type TakerPlatformStatsRow } from "./indexer.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 import { calculateHistoricalTakerPolicy } from "./policies.js";
 import { BLOCKED_WALLET_HASHES, isBlockedWallet } from "./staticWalletRules.js";
@@ -44,7 +44,13 @@ export async function calculateDesiredSnapshot(
   const takerPlatformStats = await indexer.getTakerPlatformStats(
     CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
   );
+  return calculateDesiredSnapshotFromRows(settings, takerPlatformStats);
+}
 
+export function calculateDesiredSnapshotFromRows(
+  settings: RuntimeSettings,
+  takerPlatformStats: TakerPlatformStatsRow[],
+): DesiredSnapshot {
   const historical = calculateHistoricalTakerPolicy({
     takerPlatformStats,
     isBlockedWallet,

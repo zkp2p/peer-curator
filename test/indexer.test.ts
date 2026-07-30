@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getV2ChargebackVerifierMap } from "../src/blockPinnedSnapshot.js";
 import { normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import { IndexerClient } from "../src/indexer.js";
 import {
@@ -443,5 +444,183 @@ describe("IndexerClient address-group membership", () => {
         snapshotBlock: 120n,
       }),
     ).rejects.toThrow("memberCount does not match");
+  });
+});
+
+describe("IndexerClient block-pinned reconciliation snapshot", () => {
+  const registryAddress = normalizeAddress("0x9999999999999999999999999999999999999999");
+  const groupId = normalizeGroupId(`0x${"11".repeat(32)}`);
+  const member = normalizeAddress("0x2222222222222222222222222222222222222222");
+  const snapshotBlock = 49_000_000n;
+  const intentHash = `0x${"33".repeat(32)}`;
+  const v2Verifier = [...getV2ChargebackVerifierMap("prod").keys()][0];
+  if (!v2Verifier) throw new Error("Missing fixture V2 verifier");
+
+  function pinnedFetch(input?: { outOfRange?: boolean }): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn().mockImplementation(async (_url, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)) as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      const id = input?.outOfRange ? "8453_49000001_1" : "8453_48999999_1";
+      let rows: Record<string, unknown>[] = [];
+      if (request.query.includes("Escrow_V2_IntentSignaled")) {
+        rows = [
+          {
+            id,
+            intentHash,
+            verifier: v2Verifier,
+            owner: taker,
+          },
+        ];
+      } else if (request.query.includes("Escrow_V2_IntentFulfilled")) {
+        rows = [{ id: "8453_48999999_2", intentHash, owner: taker, amount: "500000000" }];
+      } else if (request.query.includes("AddressGroupRegistry_GroupCreated")) {
+        rows = [{ id: "8453_48999998_1", groupId }];
+      } else if (request.query.includes("AddressGroupRegistry_MemberAdded")) {
+        rows = [{ id: "8453_48999999_3", groupId, member }];
+      } else if (request.query.includes("GroupRegistryBinding")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              AddressGroup: [
+                {
+                  id: `8453_${registryAddress}_${groupId}`,
+                  chainId: 8453,
+                  registryAddress,
+                  groupId,
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ data: { rows } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("constrains every immutable event query to one explicit block", async () => {
+    const fetchMock = pinnedFetch();
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const snapshot = await client.getBlockPinnedReconciliationSnapshot({
+      registryAddress,
+      groupIds: [groupId],
+      deploymentBlock: 48_000_000n,
+      paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+      snapshotBlock,
+      v2Environment: "prod",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(snapshot.membership.snapshotBlock).toBe(snapshotBlock);
+    expect(snapshot.membership.membersByGroupId.get(groupId)).toEqual(new Set([member]));
+    expect(snapshot.takerPlatformStats).toHaveLength(1);
+    for (const call of fetchMock.mock.calls.slice(0, 7)) {
+      const request = JSON.parse(String((call[1] as RequestInit).body)) as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      expect(request.query).toContain("id: { _gt: $after, _lte: $through }");
+      expect(request.variables.through).toBe("8453_49000000_999999999");
+    }
+    expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("fails closed if an indexer returns an event beyond the chosen block", async () => {
+    pinnedFetch({ outOfRange: true });
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getBlockPinnedReconciliationSnapshot({
+        registryAddress,
+        groupIds: [groupId],
+        deploymentBlock: 48_000_000n,
+        paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+        snapshotBlock,
+        v2Environment: "prod",
+      }),
+    ).rejects.toThrow("outside the requested block snapshot");
+  });
+
+  it("rejects snapshots outside the event-id ordering window", async () => {
+    pinnedFetch();
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getBlockPinnedReconciliationSnapshot({
+        registryAddress,
+        groupIds: [groupId],
+        deploymentBlock: 100n,
+        paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+        snapshotBlock: 120n,
+        v2Environment: "prod",
+      }),
+    ).rejects.toThrow("outside the fail-closed Base event-id ordering window");
+  });
+
+  it("fails closed when group ids are projected under another registry", async () => {
+    const fetchMock = pinnedFetch();
+    fetchMock.mockImplementation(async (_url, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)) as { query: string };
+      if (request.query.includes("GroupRegistryBinding")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              AddressGroup: [
+                {
+                  id: `8453_0x8888888888888888888888888888888888888888_${groupId}`,
+                  chainId: 8453,
+                  registryAddress: "0x8888888888888888888888888888888888888888",
+                  groupId,
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ data: { rows: [] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+    await expect(
+      client.getBlockPinnedReconciliationSnapshot({
+        registryAddress,
+        groupIds: [groupId],
+        deploymentBlock: 48_000_000n,
+        paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+        snapshotBlock,
+        v2Environment: "prod",
+      }),
+    ).rejects.toThrow("unexpected registry");
   });
 });

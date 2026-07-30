@@ -3,9 +3,9 @@ import { TIERS } from "../src/domain.js";
 import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "../src/phases.js";
 import { buildReconciliationPlan } from "../src/reconcile.js";
 import {
+  assertMatchingSnapshotEvidence,
   assertPinnedIndexerSnapshot,
-  IndexerSnapshotAdvancedError,
-  runWithSnapshotRetries,
+  choosePinnedSnapshotBlock,
 } from "../src/runner.js";
 import { addr, applyMutations, groupId, planFixture } from "./fixtures.js";
 
@@ -14,79 +14,72 @@ describe("assertPinnedIndexerSnapshot", () => {
     expect(() =>
       assertPinnedIndexerSnapshot({
         snapshotBlock: 150n,
-        finalIndexedBlock: 150n,
+        indexedThroughBlock: 160n,
         rpcLatestBlock: 200n,
         confirmationBlocks: 20n,
       }),
     ).not.toThrow();
   });
 
-  it("rejects an indexer watermark that changed while aggregate and membership rows were read", () => {
-    expect(() =>
-      assertPinnedIndexerSnapshot({
-        snapshotBlock: 150n,
-        finalIndexedBlock: 151n,
-        rpcLatestBlock: 200n,
-        confirmationBlocks: 20n,
-      }),
-    ).toThrow("Indexer advanced");
-  });
-
   it("rejects a watermark that has not reached the configured confirmation depth", () => {
     expect(() =>
       assertPinnedIndexerSnapshot({
         snapshotBlock: 190n,
-        finalIndexedBlock: 190n,
+        indexedThroughBlock: 200n,
         rpcLatestBlock: 200n,
         confirmationBlocks: 20n,
       }),
     ).toThrow("not sufficiently confirmed");
   });
-});
 
-describe("runWithSnapshotRetries", () => {
-  it("retries only the read-only snapshot race and then succeeds", async () => {
-    let attempts = 0;
-    const operation = async () => {
-      attempts += 1;
-      if (attempts < 3) throw new IndexerSnapshotAdvancedError();
-    };
-    const logger = {
-      warn: () => undefined,
-    };
-
-    await runWithSnapshotRetries(
-      {
-        snapshotMaxAttempts: 3,
-        snapshotRetryDelayMs: 0,
-      } as never,
-      logger as never,
-      undefined,
-      operation as never,
-    );
-
-    expect(attempts).toBe(3);
+  it("rejects a final watermark below the chosen snapshot", () => {
+    expect(() =>
+      assertPinnedIndexerSnapshot({
+        snapshotBlock: 180n,
+        indexedThroughBlock: 179n,
+        rpcLatestBlock: 200n,
+        confirmationBlocks: 20n,
+      }),
+    ).toThrow("ahead of the indexer watermark");
   });
 
-  it("does not retry unrelated failures", async () => {
-    let attempts = 0;
-    const operation = async () => {
-      attempts += 1;
-      throw new Error("transaction failed");
-    };
+  it("chooses the lower of the indexer watermark and confirmed RPC head", () => {
+    expect(
+      choosePinnedSnapshotBlock({
+        indexedThroughBlock: 195n,
+        rpcLatestBlock: 200n,
+        confirmationBlocks: 20n,
+      }),
+    ).toBe(180n);
+    expect(
+      choosePinnedSnapshotBlock({
+        indexedThroughBlock: 175n,
+        rpcLatestBlock: 200n,
+        confirmationBlocks: 20n,
+      }),
+    ).toBe(175n);
+  });
+});
 
-    await expect(
-      runWithSnapshotRetries(
-        {
-          snapshotMaxAttempts: 10,
-          snapshotRetryDelayMs: 0,
-        } as never,
-        { warn: () => undefined } as never,
-        undefined,
-        operation as never,
-      ),
-    ).rejects.toThrow("transaction failed");
-    expect(attempts).toBe(1);
+describe("assertMatchingSnapshotEvidence", () => {
+  const snapshot = (digestDigit: string) => ({
+    takerPlatformStats: [],
+    membership: {
+      membersByGroupId: new Map(),
+      snapshotBlock: 180n,
+      indexedThroughBlock: 180n,
+    },
+    evidenceDigest: `0x${digestDigit.repeat(64)}` as `0x${string}`,
+  });
+
+  it("accepts two byte-identical reconstruction passes", () => {
+    expect(() => assertMatchingSnapshotEvidence(snapshot("1"), snapshot("1"))).not.toThrow();
+  });
+
+  it("rejects changed event evidence at the same block", () => {
+    expect(() => assertMatchingSnapshotEvidence(snapshot("1"), snapshot("2"))).toThrow(
+      "changed between block-pinned reconstruction passes",
+    );
   });
 });
 

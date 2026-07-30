@@ -1,6 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import {
+  V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES,
+  V2_HISTORY_REGISTRY_BY_ENVIRONMENT,
+  type V2HistoryEnvironment,
+} from "../src/blockPinnedSnapshot.js";
 
 interface SurfaceCheck {
   producer: string;
@@ -63,17 +68,100 @@ function checkAddressGroupBinding(input: {
   ref: string;
   surface: string;
   content: string;
+  environment: V2HistoryEnvironment;
 }): SurfaceCheck {
-  const hasNonzeroAddress =
-    /- name: AddressGroupRegistry\s*\n\s+address:\s*["']0x(?!0{40})[0-9a-fA-F]{40}["']/m.test(
-      input.content,
-    );
+  const bindings = [
+    ...input.content.matchAll(
+      /- name: AddressGroupRegistry\s*\n\s+address:\s*["'](0x(?!0{40})[0-9a-fA-F]{40})["']/gm,
+    ),
+  ];
+  const expectedAddress = V2_HISTORY_REGISTRY_BY_ENVIRONMENT[input.environment];
+  const hasExactBinding =
+    bindings.length === 1 && bindings[0]?.[1]?.toLowerCase() === expectedAddress;
   return {
     producer: "zkp2p-indexer",
     ref: input.ref,
     surface: input.surface,
-    status: hasNonzeroAddress ? "compatible" : "incompatible",
-    missing: hasNonzeroAddress ? [] : ["nonzero AddressGroupRegistry address binding"],
+    status: hasExactBinding ? "compatible" : "incompatible",
+    missing: hasExactBinding
+      ? []
+      : [`exact ${input.environment} AddressGroupRegistry address binding`],
+  };
+}
+
+function checkLegacyVerifierMapping(content: string): SurfaceCheck {
+  const missing = V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.filter(
+    ([verifier, method]) =>
+      !new RegExp(`"${verifier}"\\s*:\\s*\\n?\\s*lookups\\.nameToHash\\.${method}`, "i").test(
+        content,
+      ),
+  ).map(([, method]) => `reviewed V2 ${method} verifier mapping`);
+  const baseStart = content.indexOf("export const BASE_MAINNET_DEPLOYMENTS");
+  const baseEnd = content.indexOf("const BASE_MAINNET_VERIFIER_TO_METHOD_HASH");
+  const baseSection =
+    baseStart >= 0 && baseEnd > baseStart ? content.slice(baseStart, baseEnd) : "";
+  for (const method of ["paypal", "venmo", "cashapp"]) {
+    const count = [...baseSection.matchAll(new RegExp(`lookups\\.nameToHash\\.${method}`, "g"))]
+      .length;
+    if (count !== 2) {
+      missing.push(`exactly two Base V2 ${method} verifier mappings`);
+    }
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "legacy V2 chargeback verifier mapping",
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
+  };
+}
+
+function checkV2SourceBinding(input: {
+  environment: V2HistoryEnvironment;
+  config: string;
+  paymentMethods: string;
+  allowDisabledSource: boolean;
+}): SurfaceCheck {
+  const deploymentStart = input.paymentMethods.indexOf(`  ${input.environment}: {`);
+  const deploymentEnd =
+    input.environment === "staging"
+      ? input.paymentMethods.indexOf("\n  prod: {", deploymentStart)
+      : input.paymentMethods.indexOf("\n};", deploymentStart);
+  const deploymentSection =
+    deploymentStart >= 0 && deploymentEnd > deploymentStart
+      ? input.paymentMethods.slice(deploymentStart, deploymentEnd)
+      : "";
+  const mappedEscrow = /v2Escrow:\s*"(0x[0-9a-fA-F]{40})"\.toLowerCase\(\)/.exec(
+    deploymentSection,
+  )?.[1];
+  const configuredEscrow = /- name: Escrow_V2\s*\n\s+address:\s*["'](0x[0-9a-fA-F]{40})["']/m.exec(
+    input.config,
+  )?.[1];
+  const sourceMatches =
+    configuredEscrow !== undefined &&
+    mappedEscrow !== undefined &&
+    (configuredEscrow.toLowerCase() === mappedEscrow.toLowerCase() ||
+      (input.allowDisabledSource &&
+        configuredEscrow.toLowerCase() === "0x0000000000000000000000000000000000000000"));
+  const missing = V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.filter(
+    ([, , environment]) => environment === input.environment,
+  )
+    .filter(
+      ([verifier, method]) =>
+        !new RegExp(`"${verifier}"\\s*:\\s*\\n?\\s*lookups\\.nameToHash\\.${method}`, "i").test(
+          deploymentSection,
+        ),
+    )
+    .map(([, method]) => `${input.environment} V2 ${method} verifier mapping`);
+  if (!sourceMatches) {
+    missing.push(`${input.environment} Escrow_V2 source bound to its verifier mapping`);
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: `${input.environment} V2 source/verifier binding`,
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
   };
 }
 
@@ -86,6 +174,18 @@ const contractPaymentMethodSources = ["paypal", "venmo", "cashapp"]
   .map((name) => show(contractsRepo, "origin/main", `deployments/verifiers/${name}.ts`))
   .join("\n");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
+const mainIndexerEventSchema = [
+  show(indexerRepo, "origin/main", "schema/events_v2.graphql"),
+  show(indexerRepo, "origin/main", "schema/events_v21.graphql"),
+  show(indexerRepo, "origin/main", "schema/events_v3.graphql"),
+].join("\n");
+const mainIndexerIntentHandlers = [
+  show(indexerRepo, "origin/main", "src/handlers/v2/intentHandlers.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v21/orchestrator_intents.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v22/EventHandler_v22.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v3/orchestrator_v3.ts"),
+].join("\n");
+const mainIndexerPaymentMethods = show(indexerRepo, "origin/main", "src/utils/paymentMethods.ts");
 const mainTakerPlatformStatsProducer = [
   show(indexerRepo, "origin/main", "src/services/takerPlatformStats.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v2/taker_stats.ts"),
@@ -153,6 +253,52 @@ const runtimeChecks = [
       "paymentMethodHash: intentBefore.paymentMethodHash",
     ],
   }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "block-pinned intent event schemas",
+    content: mainIndexerEventSchema,
+    required: [
+      "type Escrow_V2_IntentSignaled",
+      "verifier: String!",
+      "owner: String!",
+      "type Escrow_V2_IntentFulfilled",
+      "type Orchestrator_V21_IntentSignaled",
+      "paymentMethod: String!",
+      "type Orchestrator_V21_IntentFulfilled",
+      "amount: BigInt!",
+      "type AddressGroupRegistry_GroupCreated",
+      "type AddressGroupRegistry_MemberAdded",
+      "type AddressGroupRegistry_MemberRemoved",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "block-pinned intent event producers",
+    content: mainIndexerIntentHandlers,
+    required: [
+      "context.Escrow_V2_IntentSignaled.set",
+      "context.Escrow_V2_IntentFulfilled.set",
+      "context.Orchestrator_V21_IntentSignaled.set",
+      "context.Orchestrator_V21_IntentFulfilled.set",
+      "onOrchestratorIntentSignaled(",
+      "onOrchestratorIntentFulfilled(",
+    ],
+  }),
+  checkLegacyVerifierMapping(mainIndexerPaymentMethods),
+  checkV2SourceBinding({
+    environment: "staging",
+    config: mainIndexerStagingConfig,
+    paymentMethods: mainIndexerPaymentMethods,
+    allowDisabledSource: true,
+  }),
+  checkV2SourceBinding({
+    environment: "prod",
+    config: mainIndexerProductionConfig,
+    paymentMethods: mainIndexerPaymentMethods,
+    allowDisabledSource: false,
+  }),
 ];
 
 const forwardChecks: SurfaceCheck[] = [];
@@ -190,6 +336,9 @@ const membershipPrerequisiteChecks = [
     required: [
       "context.AddressGroupMember.set",
       "context.AddressGroupMember.deleteUnsafe",
+      "context.AddressGroupRegistry_GroupCreated.set",
+      "context.AddressGroupRegistry_MemberAdded.set",
+      "context.AddressGroupRegistry_MemberRemoved.set",
       "memberCount: group.memberCount + 1",
       "memberCount: Math.max(0, group.memberCount - 1)",
     ],
@@ -198,11 +347,13 @@ const membershipPrerequisiteChecks = [
     ref: "origin/main",
     surface: "staging AddressGroupRegistry source binding",
     content: mainIndexerStagingConfig,
+    environment: "staging",
   }),
   checkAddressGroupBinding({
     ref: "origin/main",
     surface: "production AddressGroupRegistry source binding",
     content: mainIndexerProductionConfig,
+    environment: "prod",
   }),
 ];
 
@@ -212,7 +363,7 @@ process.stdout.write(
       runtimeChecks,
       forwardChecks,
       membershipPrerequisiteChecks,
-      note: "Chargebackable platform aggregates and every current-membership prerequisite must remain compatible before rollout.",
+      note: "Block-pinned lifecycle/group events, chargeback aggregates, and every current-membership verification prerequisite must remain compatible before rollout.",
     },
     null,
     2,
