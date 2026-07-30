@@ -6,10 +6,10 @@ import type {
   Transport,
   WalletClient,
 } from "viem";
-import { zeroAddress } from "viem";
+import { getAbiItem, parseEventLogs, zeroAddress } from "viem";
 import { base } from "viem/chains";
 import { addressGroupRegistryAbi } from "./contracts.js";
-import { type GroupId, type GroupsConfig, normalizeAddress } from "./domain.js";
+import { type GroupId, type GroupsConfig, normalizeAddress, normalizeGroupId } from "./domain.js";
 import type { IndexedMembershipSnapshot } from "./indexer.js";
 
 export interface GroupGovernance {
@@ -32,6 +32,117 @@ export interface GroupMutation {
   operation: "add" | "remove";
   groupId: GroupId;
   members: Address[];
+}
+
+const memberAddedEvent = getAbiItem({
+  abi: addressGroupRegistryAbi,
+  name: "MemberAdded",
+});
+const memberRemovedEvent = getAbiItem({
+  abi: addressGroupRegistryAbi,
+  name: "MemberRemoved",
+});
+
+export async function assertMembershipEventsMatchExpected<transport extends Transport>(input: {
+  publicClient: PublicClient<transport, typeof base>;
+  registryAddress: Address;
+  groupId: GroupId;
+  snapshotBlock: bigint;
+  expectedAddedMembers: ReadonlySet<Address>;
+}): Promise<bigint> {
+  const latestBlock = await input.publicClient.getBlockNumber();
+  if (latestBlock < input.snapshotBlock) {
+    throw new Error("RPC head fell below the merchant snapshot block");
+  }
+
+  const expectedAddedMembers = new Set(
+    [...input.expectedAddedMembers].map((member) => normalizeAddress(member)),
+  );
+  if (latestBlock === input.snapshotBlock) {
+    if (expectedAddedMembers.size > 0) {
+      throw new Error("Expected merchant seed events are not yet visible onchain");
+    }
+    return latestBlock;
+  }
+
+  const [additions, removals] = await Promise.all([
+    input.publicClient.getLogs({
+      address: input.registryAddress,
+      event: memberAddedEvent,
+      args: { groupId: input.groupId },
+      fromBlock: input.snapshotBlock + 1n,
+      toBlock: latestBlock,
+      strict: true,
+    }),
+    input.publicClient.getLogs({
+      address: input.registryAddress,
+      event: memberRemovedEvent,
+      args: { groupId: input.groupId },
+      fromBlock: input.snapshotBlock + 1n,
+      toBlock: latestBlock,
+      strict: true,
+    }),
+  ]);
+  if (removals.length > 0) {
+    throw new Error("Merchant group membership was removed after the approved snapshot");
+  }
+
+  const actualAddedMembers = additions.map((event) => normalizeAddress(event.args.member));
+  const actualAddedMemberSet = new Set(actualAddedMembers);
+  if (
+    actualAddedMembers.length !== expectedAddedMembers.size ||
+    actualAddedMemberSet.size !== expectedAddedMembers.size ||
+    [...actualAddedMemberSet].some((member) => !expectedAddedMembers.has(member))
+  ) {
+    throw new Error("Merchant group membership changed after the approved snapshot");
+  }
+  return latestBlock;
+}
+
+export async function createCuratedGroup<
+  publicTransport extends Transport,
+  walletTransport extends Transport,
+>(input: {
+  publicClient: PublicClient<publicTransport, typeof base>;
+  walletClient: WalletClient<walletTransport, typeof base, PrivateKeyAccount>;
+  account: PrivateKeyAccount;
+  registryAddress: Address;
+  name: string;
+}): Promise<{ groupId: GroupId; transactionHash: `0x${string}`; blockNumber: bigint }> {
+  const simulation = await input.publicClient.simulateContract({
+    account: input.account,
+    address: input.registryAddress,
+    abi: addressGroupRegistryAbi,
+    functionName: "createGroup",
+    args: [input.name],
+  });
+  const transactionHash = await input.walletClient.writeContract(simulation.request);
+  const receipt = await input.publicClient.waitForTransactionReceipt({
+    hash: transactionHash,
+    confirmations: 1,
+  });
+  if (receipt.status !== "success") {
+    throw new Error(`Registry group creation reverted: ${transactionHash}`);
+  }
+  const created = parseEventLogs({
+    abi: addressGroupRegistryAbi,
+    eventName: "GroupCreated",
+    logs: receipt.logs,
+    strict: true,
+  }).filter(
+    (log) =>
+      log.address.toLowerCase() === input.registryAddress.toLowerCase() &&
+      log.args.curator.toLowerCase() === input.account.address.toLowerCase() &&
+      log.args.name === input.name,
+  );
+  if (created.length !== 1 || !created[0]) {
+    throw new Error("Group creation receipt did not contain one matching GroupCreated event");
+  }
+  return {
+    groupId: normalizeGroupId(created[0].args.groupId),
+    transactionHash,
+    blockNumber: receipt.blockNumber,
+  };
 }
 
 export async function loadRegistryGovernance<transport extends Transport>(
@@ -130,6 +241,7 @@ export async function executeMutations<
   account: PrivateKeyAccount;
   registryAddress: Address;
   mutations: GroupMutation[];
+  beforeMutation?: (mutation: GroupMutation, transactionIndex: number) => Promise<void>;
   onTransaction?: (hash: `0x${string}`, mutation: GroupMutation) => void;
 }): Promise<`0x${string}`[]> {
   const transactionHashes: `0x${string}`[] = [];
@@ -138,7 +250,8 @@ export async function executeMutations<
     address: input.account.address,
     blockTag: "pending",
   });
-  for (const mutation of input.mutations) {
+  for (const [transactionIndex, mutation] of input.mutations.entries()) {
+    await input.beforeMutation?.(mutation, transactionIndex);
     let hash: `0x${string}`;
     if (mutation.operation === "add") {
       await input.publicClient.simulateContract({

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { V2_HISTORY_REGISTRY_BY_ENVIRONMENT } from "../src/blockPinnedSnapshot.js";
 import { loadSettings, parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
+import { loadMerchantSettings, parseMerchantGroupConfig } from "../src/merchantConfig.js";
 
 function groupsFixture(registryAddress: string = `0x${"f".repeat(40)}`): unknown {
   return {
@@ -99,6 +100,33 @@ describe("parseGroupsConfig", () => {
     second.scope = first.scope;
     second.tier = first.tier;
     expect(() => parseGroupsConfig(JSON.stringify(fixture))).toThrow("duplicate scope/tier");
+  });
+});
+
+describe("parseMerchantGroupConfig", () => {
+  it("accepts an exact empty-cohort safety bound", () => {
+    expect(
+      parseMerchantGroupConfig(
+        JSON.stringify({
+          chainId: 8453,
+          registryAddress: `0x${"f".repeat(40)}`,
+          registryDeploymentBlock: "1",
+          groupId: `0x${"1".repeat(64)}`,
+          minimumMembers: 0,
+          maximumMembers: 0,
+        }),
+      ),
+    ).toMatchObject({
+      minimumMembers: 0,
+      maximumMembers: 0,
+    });
+  });
+
+  it("loads the merchant per-run execution budget", async () => {
+    vi.stubEnv("MAX_EXECUTED_ADDS_PER_RUN", "7");
+    await expect(loadMerchantSettings("calculate")).resolves.toMatchObject({
+      maxExecutedAddsPerRun: 7,
+    });
   });
 });
 

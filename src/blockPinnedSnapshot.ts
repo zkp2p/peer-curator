@@ -29,6 +29,45 @@ export interface RawUnifiedIntentFulfilled {
   amount: string;
 }
 
+export interface RawDepositMaker {
+  id: string;
+  chainId: number;
+  escrowAddress: string;
+  depositId: string;
+  depositor: string;
+}
+
+export interface RawV2MerchantIntentSignaled {
+  id: string;
+  intentHash: string;
+  depositId: string;
+  verifier: string;
+  amount: string;
+}
+
+export interface RawV2MerchantIntentFulfilled {
+  id: string;
+  intentHash: string;
+  depositId: string;
+  verifier: string;
+  amount: string;
+}
+
+export interface RawUnifiedMerchantIntentSignaled {
+  id: string;
+  intentHash: string;
+  escrow: string;
+  depositId: string;
+  paymentMethod: string;
+}
+
+export interface RawUnifiedMerchantIntentFulfilled {
+  id: string;
+  intentHash: string;
+  amount: string;
+  isManualRelease: boolean;
+}
+
 export interface RawGroupCreatedEvent {
   id: string;
   groupId: string;
@@ -52,6 +91,15 @@ export interface ReconstructedPlatformRow {
   totalAmountTaken: bigint;
 }
 
+export interface ReconstructedMakerPlatformRow {
+  id: string;
+  maker: Address;
+  paymentMethodHash: Hex;
+  totalAmountTaken: bigint;
+  nonManualReleaseVolume: bigint;
+  manualReleaseVolume: bigint;
+}
+
 const BASE_EVENT_ID_MIN_BLOCK = 10_000_000n;
 const BASE_EVENT_ID_MAX_BLOCK = 99_999_999n;
 
@@ -66,6 +114,11 @@ export type V2HistoryEnvironment = "staging" | "prod";
 export const V2_HISTORY_REGISTRY_BY_ENVIRONMENT = Object.freeze({
   staging: "0x54ff7788cb42b46fe2f016a65fd0f654bb9bcf3d",
   prod: "0x39f80118f9eb619135f116171b6cb91d372c5af2",
+} satisfies Record<V2HistoryEnvironment, Address>);
+
+export const V2_HISTORY_ESCROW_BY_ENVIRONMENT = Object.freeze({
+  staging: "0xc8cd114c6274ef1066840337e7678bc9731bea68",
+  prod: "0xca38607d85e8f6294dc10728669605e6664c2d70",
 } satisfies Record<V2HistoryEnvironment, Address>);
 
 export const V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES = Object.freeze([
@@ -394,4 +447,177 @@ export function reconstructMembership(input: {
   }
 
   return membersByGroupId;
+}
+
+function parseDepositId(value: unknown): bigint {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new Error("Indexer row has an invalid deposit id");
+  }
+  return BigInt(value);
+}
+
+export function reconstructMerchantPlatformRows(input: {
+  chainId: number;
+  snapshotBlock: bigint;
+  v2Environment: V2HistoryEnvironment;
+  deposits: RawDepositMaker[];
+  v2Signals: RawV2MerchantIntentSignaled[];
+  v2Fulfillments: RawV2MerchantIntentFulfilled[];
+  unifiedSignals: RawUnifiedMerchantIntentSignaled[];
+  unifiedFulfillments: RawUnifiedMerchantIntentFulfilled[];
+}): ReconstructedMakerPlatformRow[] {
+  ensureUniqueEventIds(input.v2Signals, input.chainId, input.snapshotBlock, "V2 signal");
+  ensureUniqueEventIds(input.v2Fulfillments, input.chainId, input.snapshotBlock, "V2 fulfillment");
+  ensureUniqueEventIds(input.unifiedSignals, input.chainId, input.snapshotBlock, "unified signal");
+  ensureUniqueEventIds(
+    input.unifiedFulfillments,
+    input.chainId,
+    input.snapshotBlock,
+    "unified fulfillment",
+  );
+  const makersByDepositId = new Map<string, Address>();
+  for (const row of input.deposits) {
+    const escrow = normalizeAddress(row.escrowAddress, "Deposit.escrowAddress");
+    const depositId = parseDepositId(row.depositId);
+    const canonicalId = `${escrow}_${depositId}`;
+    if (
+      row.chainId !== input.chainId ||
+      row.id.toLowerCase() !== canonicalId ||
+      makersByDepositId.has(canonicalId)
+    ) {
+      throw new Error("Indexer returned an invalid or duplicate Deposit maker binding");
+    }
+    makersByDepositId.set(canonicalId, normalizeAddress(row.depositor, "Deposit.depositor"));
+  }
+
+  const v2MethodByVerifier = getV2ChargebackVerifierMap(input.v2Environment);
+  const v2Escrow = V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.v2Environment];
+  const signals = new Map<
+    Hex,
+    {
+      eventId: string;
+      version: "v2" | "unified";
+      maker: Address;
+      paymentMethodHash?: Hex;
+      verifier?: Address;
+      amount?: bigint;
+      depositId: bigint;
+    }
+  >();
+  for (const row of input.v2Signals) {
+    const intentHash = normalizeIntentHash(row.intentHash);
+    const depositId = parseDepositId(row.depositId);
+    const maker = makersByDepositId.get(`${v2Escrow}_${depositId}`);
+    if (!maker) throw new Error("V2 signal has no Deposit maker binding");
+    const verifier = normalizeAddress(row.verifier, "V2 IntentSignaled.verifier");
+    const method = v2MethodByVerifier.get(verifier);
+    if (signals.has(intentHash)) throw new Error("Indexer returned duplicate intent signals");
+    signals.set(intentHash, {
+      eventId: row.id,
+      version: "v2",
+      maker,
+      ...(method ? { paymentMethodHash: CHARGEBACKABLE_PAYMENT_METHOD_HASHES[method] } : {}),
+      verifier,
+      amount: parseAmount(row.amount),
+      depositId,
+    });
+  }
+  for (const row of input.unifiedSignals) {
+    const intentHash = normalizeIntentHash(row.intentHash);
+    const depositId = parseDepositId(row.depositId);
+    const escrow = normalizeAddress(row.escrow, "IntentSignaled.escrow");
+    const maker = makersByDepositId.get(`${escrow}_${depositId}`);
+    if (!maker) throw new Error("Unified signal has no Deposit maker binding");
+    const paymentMethodHash = normalizePaymentMethodHash(row.paymentMethod);
+    const isChargebackable = Object.values(CHARGEBACKABLE_PAYMENT_METHOD_HASHES).includes(
+      paymentMethodHash,
+    );
+    if (signals.has(intentHash)) throw new Error("Indexer returned duplicate intent signals");
+    signals.set(intentHash, {
+      eventId: row.id,
+      version: "unified",
+      maker,
+      ...(isChargebackable ? { paymentMethodHash } : {}),
+      depositId,
+    });
+  }
+
+  const totals = new Map<
+    string,
+    { maker: Address; paymentMethodHash: Hex; nonManualReleaseVolume: bigint }
+  >();
+  const fulfilled = new Set<Hex>();
+  const record = (row: {
+    id: string;
+    intentHash: unknown;
+    depositId?: unknown;
+    verifier?: unknown;
+    amount: unknown;
+    isManualRelease: boolean;
+    version: "v2" | "unified";
+  }): void => {
+    const intentHash = normalizeIntentHash(row.intentHash);
+    const signal = signals.get(intentHash);
+    if (!signal) throw new Error("Indexer returned a fulfillment without a matching signal");
+    if (
+      signal.version !== row.version ||
+      compareEventIds({ id: signal.eventId }, row, input.chainId, input.snapshotBlock) >= 0
+    ) {
+      throw new Error("Indexer returned an invalid fulfillment lifecycle");
+    }
+    if (fulfilled.has(intentHash)) throw new Error("Indexer returned duplicate fulfillment");
+    fulfilled.add(intentHash);
+    if (row.depositId !== undefined && parseDepositId(row.depositId) !== signal.depositId) {
+      throw new Error("V2 signal and fulfillment deposit ids do not match");
+    }
+    if (row.verifier !== undefined) {
+      if (typeof row.verifier !== "string") {
+        throw new Error("V2 fulfillment has an invalid verifier");
+      }
+      const verifier = normalizeAddress(row.verifier, "V2 IntentFulfilled.verifier");
+      const isManualRelease = verifier === "0x0000000000000000000000000000000000000000";
+      if (
+        isManualRelease !== row.isManualRelease ||
+        (!isManualRelease && verifier !== signal.verifier)
+      ) {
+        throw new Error("V2 fulfillment verifier does not match its signal");
+      }
+    }
+    if (row.isManualRelease || !signal.paymentMethodHash) return;
+    const amount = row.version === "v2" ? signal.amount : parseAmount(row.amount);
+    if (!amount) throw new Error("V2 signal amount is unavailable");
+    const key = `${input.chainId}_${signal.maker}_${signal.paymentMethodHash}`;
+    const existing = totals.get(key);
+    totals.set(key, {
+      maker: signal.maker,
+      paymentMethodHash: signal.paymentMethodHash,
+      nonManualReleaseVolume: (existing?.nonManualReleaseVolume ?? 0n) + amount,
+    });
+  };
+
+  for (const row of input.v2Fulfillments) {
+    const verifier = normalizeAddress(row.verifier, "V2 IntentFulfilled.verifier");
+    record({
+      ...row,
+      version: "v2",
+      isManualRelease: verifier === "0x0000000000000000000000000000000000000000",
+    });
+  }
+  for (const row of input.unifiedFulfillments) {
+    if (typeof row.isManualRelease !== "boolean") {
+      throw new Error("Unified fulfillment has an invalid manual-release flag");
+    }
+    record({ ...row, version: "unified" });
+  }
+
+  return [...totals.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([id, row]) => ({
+      id,
+      maker: row.maker,
+      paymentMethodHash: row.paymentMethodHash,
+      totalAmountTaken: row.nonManualReleaseVolume,
+      nonManualReleaseVolume: row.nonManualReleaseVolume,
+      manualReleaseVolume: 0n,
+    }));
 }

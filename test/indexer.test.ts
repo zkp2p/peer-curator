@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getV2ChargebackVerifierMap } from "../src/blockPinnedSnapshot.js";
+import {
+  getV2ChargebackVerifierMap,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
+} from "../src/blockPinnedSnapshot.js";
 import { normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import { IndexerClient } from "../src/indexer.js";
 import {
@@ -273,6 +276,79 @@ describe("IndexerClient taker-platform pagination and validation", () => {
   });
 });
 
+describe("IndexerClient maker-platform volume split", () => {
+  function makerRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: `8453_${taker}_${paypalHash}`,
+      chainId: 8453,
+      maker: taker,
+      paymentMethodHash: paypalHash,
+      totalAmountTaken: "150",
+      nonManualReleaseVolume: "100",
+      manualReleaseVolume: "50",
+      ...overrides,
+    };
+  }
+
+  it("reads all three maker volume fields and validates their invariant", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { MakerPlatformStats: [makerRow()] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const rows = await client.getMakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET);
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        maker: taker,
+        totalAmountTaken: 150n,
+        nonManualReleaseVolume: 100n,
+        manualReleaseVolume: 50n,
+      }),
+    ]);
+  });
+
+  it("fails closed when the split does not equal the total", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            data: {
+              MakerPlatformStats: [makerRow({ nonManualReleaseVolume: "99" })],
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getMakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET),
+    ).rejects.toThrow("volume split does not equal");
+  });
+});
+
 describe("IndexerClient address-group membership", () => {
   const registryAddress = normalizeAddress("0x9999999999999999999999999999999999999999");
   const firstMember = "0x1111111111111111111111111111111111111111";
@@ -464,6 +540,24 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
       };
       const id = input?.outOfRange ? "8453_49000001_1" : "8453_48999999_1";
       let rows: Record<string, unknown>[] = [];
+      if (request.query.includes("DepositMakerPage")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              Deposit: [
+                {
+                  id: `${V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod}_1`,
+                  chainId: 8453,
+                  escrowAddress: V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod,
+                  depositId: "1",
+                  depositor: "0x7777777777777777777777777777777777777777",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
       if (request.query.includes("Escrow_V2_IntentSignaled")) {
         rows = [
           {
@@ -471,10 +565,21 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
             intentHash,
             verifier: v2Verifier,
             owner: taker,
+            depositId: "1",
+            amount: "500000000",
           },
         ];
       } else if (request.query.includes("Escrow_V2_IntentFulfilled")) {
-        rows = [{ id: "8453_48999999_2", intentHash, owner: taker, amount: "500000000" }];
+        rows = [
+          {
+            id: "8453_48999999_2",
+            intentHash,
+            owner: taker,
+            depositId: "1",
+            verifier: v2Verifier,
+            amount: "500000000",
+          },
+        ];
       } else if (request.query.includes("AddressGroupRegistry_GroupCreated")) {
         rows = [{ id: "8453_48999998_1", groupId }];
       } else if (request.query.includes("AddressGroupRegistry_MemberAdded")) {
@@ -535,6 +640,61 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
       expect(request.query).toContain("id: { _gt: $after, _lte: $through }");
       expect(request.variables.through).toBe("8453_49000000_999999999");
     }
+    expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("reconstructs a membership-only snapshot from immutable group events", async () => {
+    const fetchMock = pinnedFetch();
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const snapshot = await client.getBlockPinnedMembershipSnapshot({
+      registryAddress,
+      groupIds: [groupId],
+      deploymentBlock: 48_000_000n,
+      snapshotBlock,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(snapshot.membership.membersByGroupId.get(groupId)).toEqual(new Set([member]));
+    expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("reconstructs maker volume from immutable lifecycle events", async () => {
+    const fetchMock = pinnedFetch();
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const snapshot = await client.getBlockPinnedMerchantSnapshot({
+      snapshotBlock,
+      v2Environment: "prod",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const depositRequest = fetchMock.mock.calls
+      .map(
+        (call) =>
+          JSON.parse(String((call[1] as RequestInit).body)) as {
+            query: string;
+            variables: Record<string, unknown>;
+          },
+      )
+      .find((request) => request.query.includes("DepositMakerPage"));
+    expect(depositRequest?.variables.ids).toEqual([`${V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod}_1`]);
+    expect(snapshot.makerPlatformStats).toEqual([
+      expect.objectContaining({
+        maker: "0x7777777777777777777777777777777777777777",
+        nonManualReleaseVolume: 500000000n,
+      }),
+    ]);
     expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
   });
 

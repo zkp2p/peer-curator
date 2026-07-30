@@ -2,9 +2,10 @@ import { parseAbi } from "viem";
 
 /**
  * Minimal runtime surface copied from zkp2p/zkp2p-v2-contracts main at
- * ce038e6c23d7cfe8fdec52ee36330a74a8478d1b.
+ * b00c6f96816a657f20eae8d91c9ae2cec683b9d6.
  */
 export const addressGroupRegistryAbi = parseAbi([
+  "function createGroup(string name) returns (bytes32 groupId)",
   "function groupExists(bytes32 groupId) view returns (bool)",
   "function getGroup(bytes32 groupId) view returns (address curator, address pendingCurator, address resolver, bool isPublic, bool exists)",
   "function members(bytes32 groupId, address account) view returns (bool)",
@@ -15,4 +16,4 @@ export const addressGroupRegistryAbi = parseAbi([
   "event MemberRemoved(bytes32 indexed groupId, address indexed member)",
 ]);
 
-export const CONTRACTS_UPSTREAM_COMMIT = "ce038e6c23d7cfe8fdec52ee36330a74a8478d1b";
+export const CONTRACTS_UPSTREAM_COMMIT = "b00c6f96816a657f20eae8d91c9ae2cec683b9d6";

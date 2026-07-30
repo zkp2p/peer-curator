@@ -5,6 +5,7 @@ import { addressGroupRegistryAbi } from "../src/contracts.js";
 describe("AddressGroupRegistry ABI", () => {
   it("contains every read, write, and event surface used by the reconciler", () => {
     for (const name of [
+      "createGroup",
       "getGroup",
       "members",
       "addMembers",

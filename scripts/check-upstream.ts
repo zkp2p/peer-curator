@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
   V2_HISTORY_REGISTRY_BY_ENVIRONMENT,
   type V2HistoryEnvironment,
 } from "../src/blockPinnedSnapshot.js";
@@ -64,6 +65,40 @@ function check(input: {
   };
 }
 
+function extractGraphqlType(content: string, typeName: string): string {
+  const header = new RegExp(`(?:^|\\n)type\\s+${typeName}\\s*\\{`, "m").exec(content);
+  if (!header) return "";
+  const start = header.index + (header[0].startsWith("\n") ? 1 : 0);
+  const openBrace = content.indexOf("{", start);
+  if (openBrace < 0) return "";
+  let depth = 0;
+  for (let index = openBrace; index < content.length; index += 1) {
+    const character = content[index];
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return content.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+function checkGraphqlType(input: {
+  producer: string;
+  ref: string;
+  typeName: string;
+  content: string;
+  requiredFields: string[];
+}): SurfaceCheck {
+  return check({
+    producer: input.producer,
+    ref: input.ref,
+    surface: `${input.typeName} GraphQL type`,
+    content: extractGraphqlType(input.content, input.typeName),
+    required: [`type ${input.typeName}`, ...input.requiredFields],
+  });
+}
+
 function checkAddressGroupBinding(input: {
   ref: string;
   surface: string;
@@ -116,11 +151,67 @@ function checkLegacyVerifierMapping(content: string): SurfaceCheck {
   };
 }
 
+function checkDepositIdHelpers(content: string): SurfaceCheck {
+  const missing: string[] = [];
+  if (
+    !/export const buildDepositId[\s\S]*?return `\$\{escrow \?\? "unknown"\}_\$\{depositId\.toString\(\)\}`;/.test(
+      content,
+    )
+  ) {
+    missing.push("V2 Deposit id is escrow_depositId");
+  }
+  if (
+    !/export const buildV21DepositId[\s\S]*?return `\$\{escrow\}_\$\{depositId\.toString\(\)\}`;/.test(
+      content,
+    )
+  ) {
+    missing.push("unified Deposit id is escrow_depositId");
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "Deposit id helpers",
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
+  };
+}
+
+function checkManualReleaseEventDerivation(content: string): SurfaceCheck {
+  const handlerStart = content.indexOf("export async function onOrchestratorIntentFulfilled");
+  const handlerEnd = content.indexOf(
+    "export async function onOrchestratorIntentPruned",
+    handlerStart,
+  );
+  const handler =
+    handlerStart >= 0 && handlerEnd > handlerStart ? content.slice(handlerStart, handlerEnd) : "";
+  const missing: string[] = [];
+  if (
+    !/const audit = \{[\s\S]*?isManualRelease:\s*event\.params\.isManualRelease,[\s\S]*?context\.Orchestrator_V21_IntentFulfilled\.set\(audit\);/.test(
+      handler,
+    )
+  ) {
+    missing.push("fulfillment audit derives isManualRelease directly from the contract event");
+  }
+  if (
+    !/recordMakerFill\([\s\S]*?BigInt\(event\.params\.amount\),\s*event\.params\.isManualRelease,/.test(
+      handler,
+    )
+  ) {
+    missing.push("maker aggregate receives the same contract-event manual-release flag");
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "unified manual-release event derivation",
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
+  };
+}
+
 function checkV2SourceBinding(input: {
   environment: V2HistoryEnvironment;
   config: string;
   paymentMethods: string;
-  allowDisabledSource: boolean;
 }): SurfaceCheck {
   const deploymentStart = input.paymentMethods.indexOf(`  ${input.environment}: {`);
   const deploymentEnd =
@@ -137,12 +228,13 @@ function checkV2SourceBinding(input: {
   const configuredEscrow = /- name: Escrow_V2\s*\n\s+address:\s*["'](0x[0-9a-fA-F]{40})["']/m.exec(
     input.config,
   )?.[1];
+  const expectedEscrow = V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.environment];
+  const constantMatches =
+    mappedEscrow !== undefined && mappedEscrow.toLowerCase() === expectedEscrow;
   const sourceMatches =
     configuredEscrow !== undefined &&
     mappedEscrow !== undefined &&
-    (configuredEscrow.toLowerCase() === mappedEscrow.toLowerCase() ||
-      (input.allowDisabledSource &&
-        configuredEscrow.toLowerCase() === "0x0000000000000000000000000000000000000000"));
+    configuredEscrow.toLowerCase() === mappedEscrow.toLowerCase();
   const missing = V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.filter(
     ([, , environment]) => environment === input.environment,
   )
@@ -155,6 +247,9 @@ function checkV2SourceBinding(input: {
     .map(([, method]) => `${input.environment} V2 ${method} verifier mapping`);
   if (!sourceMatches) {
     missing.push(`${input.environment} Escrow_V2 source bound to its verifier mapping`);
+  }
+  if (!constantMatches) {
+    missing.push(`${input.environment} V2 escrow constant matches upstream`);
   }
   return {
     producer: "zkp2p-indexer",
@@ -179,18 +274,39 @@ const mainIndexerEventSchema = [
   show(indexerRepo, "origin/main", "schema/events_v21.graphql"),
   show(indexerRepo, "origin/main", "schema/events_v3.graphql"),
 ].join("\n");
+const mainUnifiedIntentProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/v21/orchestrator_intents.ts",
+);
 const mainIndexerIntentHandlers = [
   show(indexerRepo, "origin/main", "src/handlers/v2/intentHandlers.ts"),
-  show(indexerRepo, "origin/main", "src/handlers/v21/orchestrator_intents.ts"),
+  mainUnifiedIntentProducer,
   show(indexerRepo, "origin/main", "src/handlers/v22/EventHandler_v22.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v3/orchestrator_v3.ts"),
 ].join("\n");
 const mainIndexerPaymentMethods = show(indexerRepo, "origin/main", "src/utils/paymentMethods.ts");
+const mainDepositIdHelpers = show(indexerRepo, "origin/main", "src/utils/helpers.ts");
+const mainV2DepositProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/v2/depositHandlers.ts",
+);
+const mainUnifiedDepositProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/v21/escrow_deposit.ts",
+);
 const mainTakerPlatformStatsProducer = [
   show(indexerRepo, "origin/main", "src/services/takerPlatformStats.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v2/taker_stats.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v21/taker_stats.ts"),
 ].join("\n");
+const mainMakerPlatformStatsProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/makerStats.ts",
+);
 const mainIndexerProductionConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
 const mainIndexerStagingConfig = show(indexerRepo, "origin/main", "config.base_staging.yaml");
 const mainAddressGroupHandler = show(
@@ -199,6 +315,152 @@ const mainAddressGroupHandler = show(
   "src/handlers/v3/address_group_registry.ts",
 );
 
+const blockPinnedGraphqlChecks = [
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "Deposit",
+    content: mainIndexerSchema,
+    requiredFields: [
+      "chainId: Int!",
+      "escrowAddress: String!",
+      "depositId: BigInt!",
+      "depositor: String!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "Escrow_V2_IntentSignaled",
+    content: mainIndexerEventSchema,
+    requiredFields: [
+      "id: ID!",
+      "intentHash: String!",
+      "depositId: BigInt!",
+      "verifier: String!",
+      "owner: String!",
+      "amount: BigInt!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "Escrow_V2_IntentFulfilled",
+    content: mainIndexerEventSchema,
+    requiredFields: [
+      "id: ID!",
+      "intentHash: String!",
+      "depositId: BigInt!",
+      "verifier: String!",
+      "owner: String!",
+      "amount: BigInt!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "Orchestrator_V21_IntentSignaled",
+    content: mainIndexerEventSchema,
+    requiredFields: [
+      "id: ID!",
+      "intentHash: String!",
+      "escrow: String!",
+      "depositId: BigInt!",
+      "paymentMethod: String!",
+      "owner: String!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "Orchestrator_V21_IntentFulfilled",
+    content: mainIndexerEventSchema,
+    requiredFields: [
+      "id: ID!",
+      "intentHash: String!",
+      "amount: BigInt!",
+      "isManualRelease: Boolean!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "AddressGroupRegistry_GroupCreated",
+    content: mainIndexerEventSchema,
+    requiredFields: ["id: ID!", "groupId: String!"],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "AddressGroupRegistry_MemberAdded",
+    content: mainIndexerEventSchema,
+    requiredFields: ["id: ID!", "groupId: String!", "member: String!"],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "AddressGroupRegistry_MemberRemoved",
+    content: mainIndexerEventSchema,
+    requiredFields: ["id: ID!", "groupId: String!", "member: String!"],
+  }),
+];
+
+const aggregateGraphqlChecks = [
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "MakerPlatformStats",
+    content: mainIndexerSchema,
+    requiredFields: [
+      "chainId: Int!",
+      "maker: String!",
+      "paymentMethodHash: String!",
+      "totalAmountTaken: BigInt!",
+      "nonManualReleaseVolume: BigInt!",
+      "manualReleaseVolume: BigInt!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "TakerPlatformStats",
+    content: mainIndexerSchema,
+    requiredFields: [
+      "chainId: Int!",
+      "taker: String!",
+      "paymentMethodHash: String!",
+      "totalAmountTaken: BigInt!",
+    ],
+  }),
+];
+
+const membershipGraphqlChecks = [
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "AddressGroup",
+    content: mainIndexerSchema,
+    requiredFields: [
+      "registryAddress: String!",
+      "groupId: String!",
+      "curator: String!",
+      "memberCount: Int!",
+    ],
+  }),
+  checkGraphqlType({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    typeName: "AddressGroupMember",
+    content: mainIndexerSchema,
+    requiredFields: [
+      "registryAddress: String!",
+      "groupId: String!",
+      "groupEntityId: String!",
+      "member: String!",
+    ],
+  }),
+];
+
 const runtimeChecks = [
   check({
     producer: "zkp2p-v2-contracts",
@@ -206,13 +468,52 @@ const runtimeChecks = [
     surface: "AddressGroupRegistry",
     content: contractSource,
     required: [
+      "function createGroup(string calldata _name) external override returns (bytes32 groupId)",
       "function addMembers",
       "function removeMembers",
+      "event GroupCreated(bytes32 indexed groupId, address indexed curator, string name);",
       "event MemberAdded",
       "event MemberRemoved",
       "function getGroup",
       "bytes32 _groupId",
     ],
+  }),
+  ...blockPinnedGraphqlChecks,
+  ...aggregateGraphqlChecks,
+  checkDepositIdHelpers(mainDepositIdHelpers),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "V2 Deposit maker binding producer",
+    content: mainV2DepositProducer,
+    required: [
+      "const depositId = buildDepositId(event.chainId, event.params.depositId);",
+      "id: depositId,",
+      "escrowAddress: getV2EscrowAddress(event.chainId)!,",
+      "depositor: event.params.depositor,",
+      "context.Deposit.set(deposit);",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "unified Deposit maker binding producer",
+    content: mainUnifiedDepositProducer,
+    required: [
+      "buildV21DepositId(",
+      "const depositId = buildDepositId(event, options);",
+      "id: depositId,",
+      'escrowAddress: escrowAddress ?? "unknown",',
+      "depositor: event.params.depositor,",
+      "context.Deposit.set(deposit);",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "maker chargeback volume aggregate producer",
+    content: mainMakerPlatformStatsProducer,
+    required: ["nonManualReleaseVolume:", "manualReleaseVolume:", "manualReleaseDelta === 0"],
   }),
   check({
     producer: "zkp2p-v2-contracts",
@@ -223,19 +524,6 @@ const runtimeChecks = [
       'calculatePaymentMethodHash("paypal")',
       'calculatePaymentMethodHash("venmo")',
       'calculatePaymentMethodHash("cashapp")',
-    ],
-  }),
-  check({
-    producer: "zkp2p-indexer",
-    ref: "origin/main",
-    surface: "chargebackable platform aggregate schema",
-    content: mainIndexerSchema,
-    required: [
-      "type TakerPlatformStats",
-      "chainId: Int!",
-      "taker: String!",
-      "paymentMethodHash: String!",
-      "totalAmountTaken: BigInt!",
     ],
   }),
   check({
@@ -256,25 +544,6 @@ const runtimeChecks = [
   check({
     producer: "zkp2p-indexer",
     ref: "origin/main",
-    surface: "block-pinned intent event schemas",
-    content: mainIndexerEventSchema,
-    required: [
-      "type Escrow_V2_IntentSignaled",
-      "verifier: String!",
-      "owner: String!",
-      "type Escrow_V2_IntentFulfilled",
-      "type Orchestrator_V21_IntentSignaled",
-      "paymentMethod: String!",
-      "type Orchestrator_V21_IntentFulfilled",
-      "amount: BigInt!",
-      "type AddressGroupRegistry_GroupCreated",
-      "type AddressGroupRegistry_MemberAdded",
-      "type AddressGroupRegistry_MemberRemoved",
-    ],
-  }),
-  check({
-    producer: "zkp2p-indexer",
-    ref: "origin/main",
     surface: "block-pinned intent event producers",
     content: mainIndexerIntentHandlers,
     required: [
@@ -286,18 +555,17 @@ const runtimeChecks = [
       "onOrchestratorIntentFulfilled(",
     ],
   }),
+  checkManualReleaseEventDerivation(mainUnifiedIntentProducer),
   checkLegacyVerifierMapping(mainIndexerPaymentMethods),
   checkV2SourceBinding({
     environment: "staging",
     config: mainIndexerStagingConfig,
     paymentMethods: mainIndexerPaymentMethods,
-    allowDisabledSource: true,
   }),
   checkV2SourceBinding({
     environment: "prod",
     config: mainIndexerProductionConfig,
     paymentMethods: mainIndexerPaymentMethods,
-    allowDisabledSource: false,
   }),
 ];
 
@@ -315,19 +583,7 @@ const membershipPrerequisiteChecks = [
       "MemberRemoved(bytes32 indexed groupId, address indexed member)",
     ],
   }),
-  check({
-    producer: "zkp2p-indexer",
-    ref: "origin/main",
-    surface: "current address-group membership schema",
-    content: mainIndexerSchema,
-    required: [
-      "type AddressGroup {",
-      "memberCount: Int!",
-      "type AddressGroupMember {",
-      "groupEntityId: String!",
-      "member: String!",
-    ],
-  }),
+  ...membershipGraphqlChecks,
   check({
     producer: "zkp2p-indexer",
     ref: "origin/main",

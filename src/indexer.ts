@@ -2,14 +2,21 @@ import { createHash } from "node:crypto";
 import type { Address, Hex } from "viem";
 import {
   buildPinnedEventIdBounds,
+  type RawDepositMaker,
   type RawGroupCreatedEvent,
   type RawMemberEvent,
   type RawUnifiedIntentFulfilled,
   type RawUnifiedIntentSignaled,
+  type RawUnifiedMerchantIntentFulfilled,
+  type RawUnifiedMerchantIntentSignaled,
   type RawV2IntentFulfilled,
   type RawV2IntentSignaled,
+  type RawV2MerchantIntentFulfilled,
+  type RawV2MerchantIntentSignaled,
   reconstructMembership,
+  reconstructMerchantPlatformRows,
   reconstructPlatformRows,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
   type V2HistoryEnvironment,
 } from "./blockPinnedSnapshot.js";
 import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
@@ -22,6 +29,15 @@ export interface TakerPlatformStatsRow {
   totalAmountTaken: bigint;
 }
 
+export interface MakerPlatformStatsRow {
+  id: string;
+  maker: Address;
+  paymentMethodHash: Hex;
+  totalAmountTaken: bigint;
+  nonManualReleaseVolume: bigint;
+  manualReleaseVolume: bigint;
+}
+
 export interface IndexedMembershipSnapshot {
   membersByGroupId: Map<GroupId, Set<Address>>;
   snapshotBlock: bigint;
@@ -32,6 +48,17 @@ export interface BlockPinnedReconciliationSnapshot {
   takerPlatformStats: TakerPlatformStatsRow[];
   membership: IndexedMembershipSnapshot;
   evidenceDigest: Hex;
+}
+
+export interface BlockPinnedMembershipSnapshot {
+  membership: IndexedMembershipSnapshot;
+  evidenceDigest: Hex;
+}
+
+export interface BlockPinnedMerchantSnapshot {
+  makerPlatformStats: MakerPlatformStatsRow[];
+  evidenceDigest: Hex;
+  snapshotBlock: bigint;
 }
 
 interface GraphQlError {
@@ -49,6 +76,16 @@ interface RawTakerPlatformStats {
   taker: string;
   paymentMethodHash: string;
   totalAmountTaken: string;
+}
+
+interface RawMakerPlatformStats {
+  id: string;
+  chainId: number;
+  maker: string;
+  paymentMethodHash: string;
+  totalAmountTaken: string;
+  nonManualReleaseVolume: string;
+  manualReleaseVolume: string;
 }
 
 interface RawAddressGroup {
@@ -85,6 +122,8 @@ const MAX_V2_SIGNAL_ROWS = 25_000;
 const MAX_V2_FULFILLMENT_ROWS = 25_000;
 const MAX_UNIFIED_SIGNAL_ROWS = 100_000;
 const MAX_UNIFIED_FULFILLMENT_ROWS = 100_000;
+const MAX_DEPOSIT_BINDING_ROWS = 25_000;
+const DEPOSIT_BINDING_BATCH_SIZE = 500;
 const MAX_GROUP_EVENT_ROWS = 10_000;
 const MAX_RETRIES = 5;
 const PUBLIC_REQUEST_INTERVAL_MS = 650;
@@ -593,6 +632,214 @@ export class IndexerClient {
     return rows;
   }
 
+  private async getDepositMakerRows(depositIds: ReadonlySet<string>): Promise<RawDepositMaker[]> {
+    const requestedIds = [...new Set([...depositIds].map((id) => id.toLowerCase()))].sort();
+    if (requestedIds.length > MAX_DEPOSIT_BINDING_ROWS) {
+      throw new Error("Referenced Deposit bindings exceed the block-snapshot safety limit");
+    }
+    if (requestedIds.length === 0) return [];
+    const query = `
+      query DepositMakerPage($chainId: Int!, $ids: [String!]!, $limit: Int!) {
+        Deposit(
+          where: {
+            chainId: { _eq: $chainId }
+            id: { _in: $ids }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          escrowAddress
+          depositId
+          depositor
+        }
+      }
+    `;
+    const rows: RawDepositMaker[] = [];
+    const seenIds = new Set<string>();
+    for (let offset = 0; offset < requestedIds.length; offset += DEPOSIT_BINDING_BATCH_SIZE) {
+      const ids = requestedIds.slice(offset, offset + DEPOSIT_BINDING_BATCH_SIZE);
+      const requestedBatch = new Set(ids);
+      const data = await this.query<{ Deposit: RawDepositMaker[] }>(query, {
+        chainId: this.chainId,
+        ids,
+        limit: ids.length,
+      });
+      const page = data.Deposit;
+      if (!Array.isArray(page)) throw new Error("Indexer response omitted Deposit");
+      if (page.length > ids.length) {
+        throw new Error("Indexer returned too many Deposit bindings");
+      }
+      let previousId = "";
+      for (const row of page) {
+        const normalizedId = typeof row.id === "string" ? row.id.toLowerCase() : "";
+        const normalizedEscrow =
+          typeof row.escrowAddress === "string" ? row.escrowAddress.toLowerCase() : "";
+        const expectedId = `${normalizedEscrow}_${row.depositId}`;
+        if (
+          normalizedId.length === 0 ||
+          normalizedId <= previousId ||
+          !requestedBatch.has(normalizedId) ||
+          seenIds.has(normalizedId) ||
+          row.chainId !== this.chainId ||
+          normalizedId !== expectedId
+        ) {
+          throw new Error("Indexer returned an invalid Deposit maker binding");
+        }
+        previousId = normalizedId;
+        seenIds.add(normalizedId);
+      }
+      rows.push(...page);
+    }
+    return rows;
+  }
+
+  public async getBlockPinnedMerchantSnapshot(input: {
+    snapshotBlock: bigint;
+    v2Environment: V2HistoryEnvironment;
+  }): Promise<BlockPinnedMerchantSnapshot> {
+    const [v2Signals, v2Fulfillments, unifiedSignals, unifiedFulfillments] = await Promise.all([
+      this.getPinnedEventRows<RawV2MerchantIntentSignaled>({
+        root: "Escrow_V2_IntentSignaled",
+        selection: "id intentHash depositId verifier amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_SIGNAL_ROWS,
+      }),
+      this.getPinnedEventRows<RawV2MerchantIntentFulfilled>({
+        root: "Escrow_V2_IntentFulfilled",
+        selection: "id intentHash depositId verifier amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_FULFILLMENT_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedMerchantIntentSignaled>({
+        root: "Orchestrator_V21_IntentSignaled",
+        selection: "id intentHash escrow depositId paymentMethod",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedMerchantIntentFulfilled>({
+        root: "Orchestrator_V21_IntentFulfilled",
+        selection: "id intentHash amount isManualRelease",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_FULFILLMENT_ROWS,
+      }),
+    ]);
+    const referencedDepositIds = new Set<string>();
+    for (const row of v2Signals) {
+      referencedDepositIds.add(
+        `${V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.v2Environment]}_${row.depositId}`,
+      );
+    }
+    for (const row of unifiedSignals) {
+      referencedDepositIds.add(`${row.escrow.toLowerCase()}_${row.depositId}`);
+    }
+    const deposits = await this.getDepositMakerRows(referencedDepositIds);
+    const makerPlatformStats = reconstructMerchantPlatformRows({
+      chainId: this.chainId,
+      snapshotBlock: input.snapshotBlock,
+      v2Environment: input.v2Environment,
+      deposits,
+      v2Signals,
+      v2Fulfillments,
+      unifiedSignals,
+      unifiedFulfillments,
+    });
+    const evidenceDigest = `0x${createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshotBlock: input.snapshotBlock.toString(),
+          referencedDeposits: deposits,
+          v2Signals,
+          v2Fulfillments,
+          unifiedSignals,
+          unifiedFulfillments,
+        }),
+      )
+      .digest("hex")}` as Hex;
+    return {
+      makerPlatformStats,
+      evidenceDigest,
+      snapshotBlock: input.snapshotBlock,
+    };
+  }
+
+  public async getBlockPinnedMembershipSnapshot(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    deploymentBlock: bigint;
+    snapshotBlock: bigint;
+  }): Promise<BlockPinnedMembershipSnapshot> {
+    const uniqueGroupIds = [...new Set(input.groupIds)];
+    if (uniqueGroupIds.length === 0 || uniqueGroupIds.length !== input.groupIds.length) {
+      throw new Error("Address group ids must be non-empty and unique");
+    }
+    if (input.deploymentBlock > input.snapshotBlock) {
+      throw new Error("Registry deployment block is greater than the requested snapshot");
+    }
+    const [creations, additions, removals, groupBindings] = await Promise.all([
+      this.getPinnedEventRows<RawGroupCreatedEvent>({
+        root: "AddressGroupRegistry_GroupCreated",
+        selection: "id groupId",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: uniqueGroupIds.length,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberAdded",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberRemoved",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getGroupBindingRows(uniqueGroupIds),
+    ]);
+    this.assertGroupRegistryBinding({
+      registryAddress: input.registryAddress,
+      groupIds: uniqueGroupIds,
+      rows: groupBindings,
+    });
+    const evidenceDigest = `0x${createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshotBlock: input.snapshotBlock.toString(),
+          creations,
+          additions,
+          removals,
+          groupBindings,
+        }),
+      )
+      .digest("hex")}` as Hex;
+    return {
+      evidenceDigest,
+      membership: {
+        membersByGroupId: reconstructMembership({
+          chainId: this.chainId,
+          snapshotBlock: input.snapshotBlock,
+          groupIds: uniqueGroupIds,
+          creations,
+          additions,
+          removals,
+        }),
+        snapshotBlock: input.snapshotBlock,
+        indexedThroughBlock: input.snapshotBlock,
+      },
+    };
+  }
+
   /**
    * Reconstructs policy volume and group membership only from immutable event
    * rows whose event ids are bounded by one explicit finalized Base block.
@@ -787,5 +1034,113 @@ export class IndexerClient {
     }
 
     return this.parseTakerPlatformStatsRows(rawRows, paymentMethodHashes);
+  }
+
+  public async getMakerPlatformStats(
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): Promise<MakerPlatformStatsRow[]> {
+    const configuredHashes = this.validatePaymentMethodHashes(paymentMethodHashes);
+    const query = `
+      query MakerPlatformStatsPage(
+        $chainId: Int!
+        $paymentMethodHashes: [String!]!
+        $after: String!
+        $limit: Int!
+      ) {
+        MakerPlatformStats(
+          where: {
+            chainId: { _eq: $chainId }
+            paymentMethodHash: { _in: $paymentMethodHashes }
+            id: { _gt: $after }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          maker
+          paymentMethodHash
+          totalAmountTaken
+          nonManualReleaseVolume
+          manualReleaseVolume
+        }
+      }
+    `;
+
+    const rawRows: RawMakerPlatformStats[] = [];
+    let after = "";
+    for (;;) {
+      const data = await this.query<{ MakerPlatformStats: RawMakerPlatformStats[] }>(query, {
+        chainId: this.chainId,
+        paymentMethodHashes: configuredHashes,
+        after,
+        limit: PAGE_SIZE,
+      });
+      const page = data.MakerPlatformStats;
+      if (!Array.isArray(page)) {
+        throw new Error("Indexer response omitted MakerPlatformStats");
+      }
+      let previousId = after;
+      for (const row of page) {
+        if (typeof row.id !== "string" || row.id <= previousId) {
+          throw new Error("Indexer returned duplicate or non-ascending MakerPlatformStats ids");
+        }
+        previousId = row.id;
+      }
+      rawRows.push(...page);
+      if (page.length < PAGE_SIZE) break;
+      const next = page.at(-1)?.id;
+      if (!next || next <= after) {
+        throw new Error("Indexer pagination did not advance for MakerPlatformStats");
+      }
+      after = next;
+    }
+
+    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
+      throw new Error("Indexer returned duplicate MakerPlatformStats rows");
+    }
+    const rows = rawRows.map((row): MakerPlatformStatsRow => {
+      const maker = normalizeAddress(row.maker, "MakerPlatformStats.maker");
+      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
+      if (
+        row.chainId !== this.chainId ||
+        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
+        !paymentMethodHashes.has(paymentMethodHash)
+      ) {
+        throw new Error("Indexer returned an unexpected MakerPlatformStats row");
+      }
+      const canonicalId = `${this.chainId}_${maker}_${paymentMethodHash}`;
+      if (row.id.toLowerCase() !== canonicalId) {
+        throw new Error("Indexer returned an invalid MakerPlatformStats id");
+      }
+      const amounts = [
+        ["totalAmountTaken", row.totalAmountTaken],
+        ["nonManualReleaseVolume", row.nonManualReleaseVolume],
+        ["manualReleaseVolume", row.manualReleaseVolume],
+      ] as const;
+      for (const [field, value] of amounts) {
+        if (typeof value !== "string" || !/^\d+$/.test(value)) {
+          throw new Error(`Indexer returned invalid MakerPlatformStats.${field}`);
+        }
+      }
+      const totalAmountTaken = BigInt(row.totalAmountTaken);
+      const nonManualReleaseVolume = BigInt(row.nonManualReleaseVolume);
+      const manualReleaseVolume = BigInt(row.manualReleaseVolume);
+      if (totalAmountTaken !== nonManualReleaseVolume + manualReleaseVolume) {
+        throw new Error("Indexer MakerPlatformStats volume split does not equal totalAmountTaken");
+      }
+      return {
+        id: canonicalId,
+        maker,
+        paymentMethodHash,
+        totalAmountTaken,
+        nonManualReleaseVolume,
+        manualReleaseVolume,
+      };
+    });
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("Indexer returned duplicate canonical MakerPlatformStats rows");
+    }
+    return rows;
   }
 }

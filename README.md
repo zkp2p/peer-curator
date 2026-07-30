@@ -4,6 +4,9 @@ Calculates and maintains the three-tier, cascading `historical-taker` policy
 family in `AddressGroupRegistry`. Current-Earn tiers are intentionally not
 calculated or reconciled.
 
+It also ships a separate, manual initializer for the single `Top Chargeback
+Merchants` group. That initializer is not wired into the 12-hour taker cron.
+
 The service pulls environment-matched indexer aggregates, excludes wallets whose
 address hashes are in the committed denylist, calculates desired membership,
 reads current registry membership from the indexer's canonical
@@ -51,6 +54,35 @@ their canonical keccak hashes at startup. All other payment platforms
 contribute zero. `TakerStats.totalFulfilledVolume`, cancellation volume, and
 lock-score data are not queried or used. There are no address-specific tier
 overrides.
+
+## Top Chargeback Merchants
+
+The one-time merchant cohort contains makers with at least $10,000 in all-time
+non-manual-release volume across exactly PayPal, Venmo, and Cash App.
+`merchant:calculate` queries `MakerPlatformStats` and requires each row to
+satisfy:
+
+```text
+totalAmountTaken = nonManualReleaseVolume + manualReleaseVolume
+```
+
+Only `nonManualReleaseVolume` contributes to qualification. Manual releases,
+all other platforms, taker volume, blocked-wallet status, lock score, and
+date-based epochs contribute zero. This is one flat group, not a tier family.
+
+For `merchant:plan` and `merchant:sync`, qualifying maker volume is rebuilt
+from immutable V2 and unified signal/fulfillment events at the same explicit
+block as membership. Static maker/deposit bindings come from the Indexer's
+`Deposit` projection and are included in the evidence digest. Both the
+merchant lifecycle reconstruction and the `GroupCreated`/`MemberAdded`/
+`MemberRemoved` membership replay run twice with covering watermark fences
+and must match byte-for-byte. The script creates a private group with a zero
+resolver, adds only missing qualifying makers, and fails if the group contains
+any member outside the calculated cohort. It never removes merchant members.
+
+This policy has no refresh cadence. The commands are deliberately absent from
+the deployed service start command and scheduled cron; run them only for a
+reviewed initialization.
 
 ## Static blocked-wallet snapshot
 
@@ -245,6 +277,40 @@ pnpm sync
 pnpm check
 pnpm check:upstream
 ```
+
+One-time merchant commands:
+
+```bash
+# Public, rate-limited verification; INDEXER_API_KEY is optional.
+pnpm merchant:calculate
+
+# Explicitly create the private group.
+EXECUTE=true \
+ALLOW_MERCHANT_GROUP_CREATION=true \
+MERCHANT_REGISTRY_ADDRESS=0xRegistry \
+RPC_URL=https://base-rpc.example \
+GROUP_ADMIN_PRIVATE_KEY=0x... \
+pnpm merchant:create
+
+# Copy the confirmed GroupCreated result into an untracked config first.
+cp config/merchant-group.example.json config/merchant-group.json
+ALLOW_INITIAL_SEED=true pnpm merchant:plan
+
+# The only command that seeds members.
+EXECUTE=true \
+ALLOW_INITIAL_SEED=true \
+RPC_URL=https://base-rpc.example \
+GROUP_ADMIN_PRIVATE_KEY=0x... \
+pnpm merchant:sync
+```
+
+`config/merchant-group.json` is intentionally ignored. Record the confirmed
+group identity in the public Groups List after the group is indexed. Use
+`minimumMembers` and `maximumMembers` to bound the reviewed initialization
+count; for the actual seed, set both to the approved count.
+`MAX_PLANNED_ADDS` is the hard abort ceiling. `MAX_EXECUTED_ADDS_PER_RUN` is
+the soft transaction budget; additions beyond it are reported as
+`deferredAdds` and require another reviewed run.
 
 ## Block-pinned indexer reconstruction
 
