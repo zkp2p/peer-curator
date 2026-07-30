@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
   V2_HISTORY_REGISTRY_BY_ENVIRONMENT,
   type V2HistoryEnvironment,
 } from "../src/blockPinnedSnapshot.js";
@@ -137,6 +138,9 @@ function checkV2SourceBinding(input: {
   const configuredEscrow = /- name: Escrow_V2\s*\n\s+address:\s*["'](0x[0-9a-fA-F]{40})["']/m.exec(
     input.config,
   )?.[1];
+  const expectedEscrow = V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.environment];
+  const constantMatches =
+    mappedEscrow !== undefined && mappedEscrow.toLowerCase() === expectedEscrow;
   const sourceMatches =
     configuredEscrow !== undefined &&
     mappedEscrow !== undefined &&
@@ -155,6 +159,9 @@ function checkV2SourceBinding(input: {
     .map(([, method]) => `${input.environment} V2 ${method} verifier mapping`);
   if (!sourceMatches) {
     missing.push(`${input.environment} Escrow_V2 source bound to its verifier mapping`);
+  }
+  if (!constantMatches) {
+    missing.push(`${input.environment} V2 escrow constant matches upstream`);
   }
   return {
     producer: "zkp2p-indexer",
