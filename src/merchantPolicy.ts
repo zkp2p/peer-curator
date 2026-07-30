@@ -2,9 +2,8 @@ import type { Address } from "viem";
 import type { MakerPlatformStatsRow } from "./indexer.js";
 
 export const USDC_BASE_UNITS = 1_000_000n;
-export const TOP_CHARGEBACK_MERCHANT_THRESHOLD_USDC = 10_000n;
-export const TOP_CHARGEBACK_MERCHANT_THRESHOLD =
-  TOP_CHARGEBACK_MERCHANT_THRESHOLD_USDC * USDC_BASE_UNITS;
+export const PEER_MAKERS_THRESHOLD_USDC = 10_000n;
+export const PEER_MAKERS_THRESHOLD = PEER_MAKERS_THRESHOLD_USDC * USDC_BASE_UNITS;
 
 export interface MerchantPolicySnapshot {
   members: Set<Address>;
@@ -13,9 +12,9 @@ export interface MerchantPolicySnapshot {
   threshold: bigint;
 }
 
-export function calculateTopChargebackMerchants(
+export function calculatePeerMakers(
   rows: MakerPlatformStatsRow[],
-  threshold = TOP_CHARGEBACK_MERCHANT_THRESHOLD,
+  threshold = PEER_MAKERS_THRESHOLD,
 ): MerchantPolicySnapshot {
   if (threshold <= 0n) {
     throw new Error("Merchant threshold must be positive");

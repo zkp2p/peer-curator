@@ -54,7 +54,7 @@ const envSchema = z.object({
   MERCHANT_REGISTRY_ADDRESS: optionalNonEmptyString,
   MERCHANT_GROUP_CONFIG_PATH: z.string().default("config/merchant-group.json"),
   MERCHANT_GROUP_CONFIG_JSON: optionalNonEmptyString,
-  MERCHANT_GROUP_NAME: z.string().min(1).max(120).default("Top Chargeback Merchants"),
+  MERCHANT_GROUP_NAME: z.string().min(1).max(120).default("Peer Makers"),
   EXECUTE: booleanFromString,
   ALLOW_MERCHANT_GROUP_CREATION: booleanFromString,
   ALLOW_INITIAL_SEED: booleanFromString,

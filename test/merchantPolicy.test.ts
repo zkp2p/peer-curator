@@ -3,8 +3,8 @@ import type { MakerPlatformStatsRow } from "../src/indexer.js";
 import {
   budgetMerchantAdditions,
   buildMerchantAdditions,
-  calculateTopChargebackMerchants,
-  TOP_CHARGEBACK_MERCHANT_THRESHOLD,
+  calculatePeerMakers,
+  PEER_MAKERS_THRESHOLD,
 } from "../src/merchantPolicy.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASHES } from "../src/paymentMethods.js";
 import { addr } from "./fixtures.js";
@@ -25,23 +25,21 @@ function row(
   };
 }
 
-describe("Top Chargeback Merchants policy", () => {
+describe("Peer Makers policy", () => {
   it("sums non-manual volume across chargebackable platforms only", () => {
     const maker = addr("1");
-    const snapshot = calculateTopChargebackMerchants([
+    const snapshot = calculatePeerMakers([
       row(maker, 4_000_000_000n, 100_000_000_000n),
       row(maker, 6_000_000_000n, 0n, CHARGEBACKABLE_PAYMENT_METHOD_HASHES.venmo),
     ]);
 
-    expect(snapshot.threshold).toBe(TOP_CHARGEBACK_MERCHANT_THRESHOLD);
+    expect(snapshot.threshold).toBe(PEER_MAKERS_THRESHOLD);
     expect(snapshot.members).toEqual(new Set([maker]));
     expect(snapshot.qualifyingVolume).toBe(10_000_000_000n);
   });
 
   it("does not let manual-release volume qualify a maker", () => {
-    const snapshot = calculateTopChargebackMerchants([
-      row(addr("1"), 9_999_999_999n, 999_999_999_999n),
-    ]);
+    const snapshot = calculatePeerMakers([row(addr("1"), 9_999_999_999n, 999_999_999_999n)]);
     expect(snapshot.members).toEqual(new Set());
   });
 

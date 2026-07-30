@@ -81,7 +81,7 @@ describe("createCuratedGroup", () => {
   it("returns the confirmed GroupCreated identity", async () => {
     const registryAddress = member("9");
     const curator = member("8");
-    const name = "Top Chargeback Merchants";
+    const name = "Peer Makers";
     const groupId = configuredGroupId;
     const topics = encodeEventTopics({
       abi: addressGroupRegistryAbi,
