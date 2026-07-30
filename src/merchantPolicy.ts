@@ -49,3 +49,20 @@ export function buildMerchantAdditions(
     unexpectedMembers: [...current].filter((address) => !desired.has(address)).sort(),
   };
 }
+
+export function budgetMerchantAdditions(
+  additions: readonly Address[],
+  maximumPerRun: number,
+): {
+  scheduledAdditions: Address[];
+  deferredAdds: number;
+} {
+  if (!Number.isSafeInteger(maximumPerRun) || maximumPerRun <= 0) {
+    throw new Error("Merchant addition budget must be a positive integer");
+  }
+  const scheduledAdditions = additions.slice(0, maximumPerRun);
+  return {
+    scheduledAdditions,
+    deferredAdds: additions.length - scheduledAdditions.length,
+  };
+}

@@ -68,6 +68,7 @@ const envSchema = z.object({
   BATCH_SIZE: positiveInteger("100"),
   SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("20"),
   MAX_PLANNED_ADDS: nonNegativeInteger("500"),
+  MAX_EXECUTED_ADDS_PER_RUN: positiveInteger("1000"),
   REQUEST_TIMEOUT_MS: positiveInteger("20000"),
   LOG_LEVEL: z.string().default("info"),
 });
@@ -113,6 +114,7 @@ export interface MerchantRuntimeSettings {
   batchSize: number;
   snapshotConfirmations: number;
   maxPlannedAdds: number;
+  maxExecutedAddsPerRun: number;
   requestTimeoutMs: number;
   logLevel: string;
 }
@@ -185,6 +187,7 @@ export async function loadMerchantSettings(
     batchSize: env.BATCH_SIZE,
     snapshotConfirmations: env.SNAPSHOT_CONFIRMATIONS,
     maxPlannedAdds: env.MAX_PLANNED_ADDS,
+    maxExecutedAddsPerRun: env.MAX_EXECUTED_ADDS_PER_RUN,
     requestTimeoutMs: env.REQUEST_TIMEOUT_MS,
     logLevel: env.LOG_LEVEL,
   };

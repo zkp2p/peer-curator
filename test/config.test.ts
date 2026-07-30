@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { V2_HISTORY_REGISTRY_BY_ENVIRONMENT } from "../src/blockPinnedSnapshot.js";
 import { loadSettings, parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
-import { parseMerchantGroupConfig } from "../src/merchantConfig.js";
+import { loadMerchantSettings, parseMerchantGroupConfig } from "../src/merchantConfig.js";
 
 function groupsFixture(registryAddress: string = `0x${"f".repeat(40)}`): unknown {
   return {
@@ -119,6 +119,13 @@ describe("parseMerchantGroupConfig", () => {
     ).toMatchObject({
       minimumMembers: 0,
       maximumMembers: 0,
+    });
+  });
+
+  it("loads the merchant per-run execution budget", async () => {
+    vi.stubEnv("MAX_EXECUTED_ADDS_PER_RUN", "7");
+    await expect(loadMerchantSettings("calculate")).resolves.toMatchObject({
+      maxExecutedAddsPerRun: 7,
     });
   });
 });

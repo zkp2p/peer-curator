@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MakerPlatformStatsRow } from "../src/indexer.js";
 import {
+  budgetMerchantAdditions,
   buildMerchantAdditions,
   calculateTopChargebackMerchants,
   TOP_CHARGEBACK_MERCHANT_THRESHOLD,
@@ -50,6 +51,14 @@ describe("Top Chargeback Merchants policy", () => {
     expect(buildMerchantAdditions(desired, current)).toEqual({
       additions: [addr("1")],
       unexpectedMembers: [addr("3")],
+    });
+  });
+
+  it("defers additions beyond the per-run execution budget", () => {
+    const additions = [addr("1"), addr("2"), addr("3")];
+    expect(budgetMerchantAdditions(additions, 2)).toEqual({
+      scheduledAdditions: [addr("1"), addr("2")],
+      deferredAdds: 1,
     });
   });
 });

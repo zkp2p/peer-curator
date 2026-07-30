@@ -21,6 +21,7 @@ import {
 import type { Logger } from "./logger.js";
 import type { MerchantRuntimeSettings } from "./merchantConfig.js";
 import {
+  budgetMerchantAdditions,
   buildMerchantAdditions,
   calculateTopChargebackMerchants,
   type MerchantPolicySnapshot,
@@ -294,16 +295,22 @@ export async function runMerchant(
   if (additions.length > settings.maxPlannedAdds) {
     throw new Error("Merchant additions exceed MAX_PLANNED_ADDS");
   }
+  const { scheduledAdditions, deferredAdds } = budgetMerchantAdditions(
+    additions,
+    settings.maxExecutedAddsPerRun,
+  );
   const initialSeed = current.size === 0 && additions.length > 0;
   if (initialSeed && !settings.allowInitialSeed) {
     throw new Error("Initial merchant seed requires ALLOW_INITIAL_SEED=true");
   }
   const groupId = merchantGroup.groupId;
-  const mutations: GroupMutation[] = chunks(additions, settings.batchSize).map((members) => ({
-    operation: "add",
-    groupId,
-    members,
-  }));
+  const mutations: GroupMutation[] = chunks(scheduledAdditions, settings.batchSize).map(
+    (members) => ({
+      operation: "add",
+      groupId,
+      members,
+    }),
+  );
   logger.info(
     {
       rpcLatestBlock: rpcLatestBlock.toString(),
@@ -315,6 +322,8 @@ export async function runMerchant(
       desiredCount: merchantSnapshot.policy.members.size,
       currentCount: current.size,
       additions: additions.length,
+      scheduledAdditions: scheduledAdditions.length,
+      deferredAdds,
       transactionBatches: mutations.length,
       initialSeed,
       execute: settings.command === "sync" && settings.execute,

@@ -308,6 +308,9 @@ pnpm merchant:sync
 group identity in the public Groups List after the group is indexed. Use
 `minimumMembers` and `maximumMembers` to bound the reviewed initialization
 count; for the actual seed, set both to the approved count.
+`MAX_PLANNED_ADDS` is the hard abort ceiling. `MAX_EXECUTED_ADDS_PER_RUN` is
+the soft transaction budget; additions beyond it are reported as
+`deferredAdds` and require another reviewed run.
 
 ## Block-pinned indexer reconstruction
 
