@@ -58,8 +58,9 @@ overrides.
 ## Top Chargeback Merchants
 
 The one-time merchant cohort contains makers with at least $10,000 in all-time
-non-manual-release volume across exactly PayPal, Venmo, and Cash App. The
-initializer queries `MakerPlatformStats` and requires each row to satisfy:
+non-manual-release volume across exactly PayPal, Venmo, and Cash App.
+`merchant:calculate` queries `MakerPlatformStats` and requires each row to
+satisfy:
 
 ```text
 totalAmountTaken = nonManualReleaseVolume + manualReleaseVolume
@@ -69,10 +70,15 @@ Only `nonManualReleaseVolume` contributes to qualification. Manual releases,
 all other platforms, taker volume, blocked-wallet status, lock score, and
 date-based epochs contribute zero. This is one flat group, not a tier family.
 
-The Indexer aggregate is read twice with watermark fences and must produce the
-same evidence digest. The script creates a private group with a zero resolver,
-adds only missing qualifying makers, and fails if the group contains any
-member outside the calculated cohort. It never removes merchant members.
+For `merchant:plan` and `merchant:sync`, qualifying maker volume is rebuilt
+from immutable V2 and unified signal/fulfillment events at the same explicit
+block as membership. Static maker/deposit bindings come from the Indexer's
+`Deposit` projection and are included in the evidence digest. Both the
+merchant lifecycle reconstruction and the `GroupCreated`/`MemberAdded`/
+`MemberRemoved` membership replay run twice with covering watermark fences
+and must match byte-for-byte. The script creates a private group with a zero
+resolver, adds only missing qualifying makers, and fails if the group contains
+any member outside the calculated cohort. It never removes merchant members.
 
 This policy has no refresh cadence. The commands are deliberately absent from
 the deployed service start command and scheduled cron; run them only for a

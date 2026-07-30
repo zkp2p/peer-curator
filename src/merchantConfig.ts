@@ -3,6 +3,10 @@ import "dotenv/config";
 import { readFile } from "node:fs/promises";
 import type { Address } from "viem";
 import { z } from "zod";
+import {
+  V2_HISTORY_REGISTRY_BY_ENVIRONMENT,
+  type V2HistoryEnvironment,
+} from "./blockPinnedSnapshot.js";
 import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
 
 const booleanFromString = z
@@ -45,6 +49,7 @@ const envSchema = z.object({
   INDEXER_GRAPHQL_URL: z.url().default("https://indexer.zkp2p.xyz/v1/graphql"),
   INDEXER_API_KEY: optionalNonEmptyString,
   CHAIN_ID: positiveInteger("8453"),
+  V2_HISTORY_ENVIRONMENT: z.enum(["staging", "prod"]).optional(),
   RPC_URL: optionalNonEmptyString,
   MERCHANT_REGISTRY_ADDRESS: optionalNonEmptyString,
   MERCHANT_GROUP_CONFIG_PATH: z.string().default("config/merchant-group.json"),
@@ -94,6 +99,7 @@ export interface MerchantGroupConfig {
 export interface MerchantRuntimeSettings {
   command: MerchantCommand;
   chainId: number;
+  v2HistoryEnvironment: V2HistoryEnvironment;
   indexerUrl: string;
   indexerApiKey?: string;
   rpcUrl?: string;
@@ -142,6 +148,10 @@ export async function loadMerchantSettings(
     throw new Error("MERCHANT_REGISTRY_ADDRESS is required for create");
   }
   const needsGroup = command === "plan" || command === "sync";
+  if (needsGroup && !env.V2_HISTORY_ENVIRONMENT) {
+    throw new Error("V2_HISTORY_ENVIRONMENT is required for merchant plan and sync");
+  }
+  const v2HistoryEnvironment = env.V2_HISTORY_ENVIRONMENT ?? "prod";
   const group = needsGroup
     ? parseMerchantGroupConfig(
         env.MERCHANT_GROUP_CONFIG_JSON ?? (await readFile(env.MERCHANT_GROUP_CONFIG_PATH, "utf8")),
@@ -150,10 +160,14 @@ export async function loadMerchantSettings(
   if (group && group.chainId !== env.CHAIN_ID) {
     throw new Error("CHAIN_ID does not match the merchant group configuration");
   }
+  if (group && group.registryAddress !== V2_HISTORY_REGISTRY_BY_ENVIRONMENT[v2HistoryEnvironment]) {
+    throw new Error("V2_HISTORY_ENVIRONMENT does not match the merchant group registry");
+  }
 
   return {
     command,
     chainId: env.CHAIN_ID,
+    v2HistoryEnvironment,
     indexerUrl: env.INDEXER_GRAPHQL_URL,
     ...(env.INDEXER_API_KEY ? { indexerApiKey: env.INDEXER_API_KEY } : {}),
     ...(env.RPC_URL ? { rpcUrl: env.RPC_URL } : {}),

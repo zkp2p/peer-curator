@@ -222,6 +222,26 @@ const runtimeChecks = [
   check({
     producer: "zkp2p-indexer",
     ref: "origin/main",
+    surface: "block-pinned merchant reconstruction inputs",
+    content: `${mainIndexerSchema}\n${mainIndexerEventSchema}`,
+    required: [
+      "type Deposit {",
+      "escrowAddress: String!",
+      "depositor: String!",
+      "type Escrow_V2_IntentSignaled",
+      "depositId: BigInt!",
+      "verifier: String!",
+      "type Escrow_V2_IntentFulfilled",
+      "type Orchestrator_V21_IntentSignaled",
+      "escrow: String!",
+      "paymentMethod: String!",
+      "type Orchestrator_V21_IntentFulfilled",
+      "isManualRelease: Boolean!",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
     surface: "maker chargeback volume aggregate",
     content: `${mainIndexerSchema}\n${mainMakerPlatformStatsProducer}`,
     required: [

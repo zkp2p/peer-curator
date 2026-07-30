@@ -11,6 +11,7 @@ Baseline reviewed on 2026-07-30.
 | Indexer membership events | `AddressGroupRegistry_GroupCreated/MemberAdded/MemberRemoved` | immutable event IDs encode chain/block/log and allow deterministic membership replay |
 | Indexer current projections | `TakerPlatformStats`, `AddressGroup`, `AddressGroupMember` | calculation parity and post-run member-count/enumeration verification |
 | Indexer merchant projection | `MakerPlatformStats` | `totalAmountTaken`, `nonManualReleaseVolume`, and `manualReleaseVolume` for one maker/payment-method tuple; the split must sum to the total |
+| Indexer merchant initialization events | V2/unified signal and fulfillment rows plus static `Deposit` maker bindings | block-bounded reconstruction excludes manual releases and resolves every qualifying platform fill to its maker |
 | Indexer synchronization | `chain_metadata` | one valid processed-block watermark from which an explicit confirmed block can be selected |
 | Indexer environment config | `AddressGroupRegistry` source | a nonzero registry address bound in the matching environment |
 | Curator history | tier policy and blocked wallets | provenance only; there is no runtime Curator dependency |

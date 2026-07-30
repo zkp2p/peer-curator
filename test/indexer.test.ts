@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getV2ChargebackVerifierMap } from "../src/blockPinnedSnapshot.js";
+import {
+  getV2ChargebackVerifierMap,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
+} from "../src/blockPinnedSnapshot.js";
 import { normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import { IndexerClient } from "../src/indexer.js";
 import {
@@ -537,6 +540,24 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
       };
       const id = input?.outOfRange ? "8453_49000001_1" : "8453_48999999_1";
       let rows: Record<string, unknown>[] = [];
+      if (request.query.includes("DepositMakerPage")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              Deposit: [
+                {
+                  id: `${V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod}_1`,
+                  chainId: 8453,
+                  escrowAddress: V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod,
+                  depositId: "1",
+                  depositor: "0x7777777777777777777777777777777777777777",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
       if (request.query.includes("Escrow_V2_IntentSignaled")) {
         rows = [
           {
@@ -544,10 +565,21 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
             intentHash,
             verifier: v2Verifier,
             owner: taker,
+            depositId: "1",
+            amount: "500000000",
           },
         ];
       } else if (request.query.includes("Escrow_V2_IntentFulfilled")) {
-        rows = [{ id: "8453_48999999_2", intentHash, owner: taker, amount: "500000000" }];
+        rows = [
+          {
+            id: "8453_48999999_2",
+            intentHash,
+            owner: taker,
+            depositId: "1",
+            verifier: v2Verifier,
+            amount: "500000000",
+          },
+        ];
       } else if (request.query.includes("AddressGroupRegistry_GroupCreated")) {
         rows = [{ id: "8453_48999998_1", groupId }];
       } else if (request.query.includes("AddressGroupRegistry_MemberAdded")) {
@@ -629,6 +661,30 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(snapshot.membership.membersByGroupId.get(groupId)).toEqual(new Set([member]));
+    expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("reconstructs maker volume from immutable lifecycle events", async () => {
+    const fetchMock = pinnedFetch();
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const snapshot = await client.getBlockPinnedMerchantSnapshot({
+      snapshotBlock,
+      v2Environment: "prod",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(snapshot.makerPlatformStats).toEqual([
+      expect.objectContaining({
+        maker: "0x7777777777777777777777777777777777777777",
+        nonManualReleaseVolume: 500000000n,
+      }),
+    ]);
     expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
   });
 

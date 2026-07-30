@@ -2,14 +2,21 @@ import { createHash } from "node:crypto";
 import type { Address, Hex } from "viem";
 import {
   buildPinnedEventIdBounds,
+  type RawDepositMaker,
   type RawGroupCreatedEvent,
   type RawMemberEvent,
   type RawUnifiedIntentFulfilled,
   type RawUnifiedIntentSignaled,
+  type RawUnifiedMerchantIntentFulfilled,
+  type RawUnifiedMerchantIntentSignaled,
   type RawV2IntentFulfilled,
   type RawV2IntentSignaled,
+  type RawV2MerchantIntentFulfilled,
+  type RawV2MerchantIntentSignaled,
   reconstructMembership,
+  reconstructMerchantPlatformRows,
   reconstructPlatformRows,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
   type V2HistoryEnvironment,
 } from "./blockPinnedSnapshot.js";
 import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
@@ -46,6 +53,12 @@ export interface BlockPinnedReconciliationSnapshot {
 export interface BlockPinnedMembershipSnapshot {
   membership: IndexedMembershipSnapshot;
   evidenceDigest: Hex;
+}
+
+export interface BlockPinnedMerchantSnapshot {
+  makerPlatformStats: MakerPlatformStatsRow[];
+  evidenceDigest: Hex;
+  snapshotBlock: bigint;
 }
 
 interface GraphQlError {
@@ -615,6 +628,126 @@ export class IndexerClient {
       after = next;
     }
     return rows;
+  }
+
+  private async getDepositMakerRows(): Promise<RawDepositMaker[]> {
+    const query = `
+      query DepositMakerPage($chainId: Int!, $after: String!, $limit: Int!) {
+        Deposit(
+          where: {
+            chainId: { _eq: $chainId }
+            id: { _gt: $after }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          escrowAddress
+          depositId
+          depositor
+        }
+      }
+    `;
+    const rows: RawDepositMaker[] = [];
+    let after = "";
+    for (;;) {
+      const data = await this.query<{ Deposit: RawDepositMaker[] }>(query, {
+        chainId: this.chainId,
+        after,
+        limit: PAGE_SIZE,
+      });
+      const page = data.Deposit;
+      if (!Array.isArray(page)) throw new Error("Indexer response omitted Deposit");
+      let previousId = after;
+      for (const row of page) {
+        if (typeof row.id !== "string" || row.id <= previousId) {
+          throw new Error("Indexer returned duplicate or non-ascending Deposit ids");
+        }
+        previousId = row.id;
+      }
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) break;
+      const next = page.at(-1)?.id;
+      if (!next || next <= after) {
+        throw new Error("Indexer pagination did not advance for Deposit");
+      }
+      after = next;
+    }
+    return rows;
+  }
+
+  public async getBlockPinnedMerchantSnapshot(input: {
+    snapshotBlock: bigint;
+    v2Environment: V2HistoryEnvironment;
+  }): Promise<BlockPinnedMerchantSnapshot> {
+    const [deposits, v2Signals, v2Fulfillments, unifiedSignals, unifiedFulfillments] =
+      await Promise.all([
+        this.getDepositMakerRows(),
+        this.getPinnedEventRows<RawV2MerchantIntentSignaled>({
+          root: "Escrow_V2_IntentSignaled",
+          selection: "id intentHash depositId verifier amount",
+          snapshotBlock: input.snapshotBlock,
+          maximumRows: MAX_V2_SIGNAL_ROWS,
+        }),
+        this.getPinnedEventRows<RawV2MerchantIntentFulfilled>({
+          root: "Escrow_V2_IntentFulfilled",
+          selection: "id intentHash depositId verifier amount",
+          snapshotBlock: input.snapshotBlock,
+          maximumRows: MAX_V2_FULFILLMENT_ROWS,
+        }),
+        this.getPinnedEventRows<RawUnifiedMerchantIntentSignaled>({
+          root: "Orchestrator_V21_IntentSignaled",
+          selection: "id intentHash escrow depositId paymentMethod",
+          snapshotBlock: input.snapshotBlock,
+          maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
+        }),
+        this.getPinnedEventRows<RawUnifiedMerchantIntentFulfilled>({
+          root: "Orchestrator_V21_IntentFulfilled",
+          selection: "id intentHash amount isManualRelease",
+          snapshotBlock: input.snapshotBlock,
+          maximumRows: MAX_UNIFIED_FULFILLMENT_ROWS,
+        }),
+      ]);
+    const makerPlatformStats = reconstructMerchantPlatformRows({
+      chainId: this.chainId,
+      snapshotBlock: input.snapshotBlock,
+      v2Environment: input.v2Environment,
+      deposits,
+      v2Signals,
+      v2Fulfillments,
+      unifiedSignals,
+      unifiedFulfillments,
+    });
+    const referencedDepositIds = new Set<string>();
+    for (const row of v2Signals) {
+      referencedDepositIds.add(
+        `${V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.v2Environment]}_${row.depositId}`,
+      );
+    }
+    for (const row of unifiedSignals) {
+      referencedDepositIds.add(`${row.escrow.toLowerCase()}_${row.depositId}`);
+    }
+    const referencedDeposits = deposits.filter((row) =>
+      referencedDepositIds.has(row.id.toLowerCase()),
+    );
+    const evidenceDigest = `0x${createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshotBlock: input.snapshotBlock.toString(),
+          referencedDeposits,
+          v2Signals,
+          v2Fulfillments,
+          unifiedSignals,
+          unifiedFulfillments,
+        }),
+      )
+      .digest("hex")}` as Hex;
+    return {
+      makerPlatformStats,
+      evidenceDigest,
+      snapshotBlock: input.snapshotBlock,
+    };
   }
 
   public async getBlockPinnedMembershipSnapshot(input: {

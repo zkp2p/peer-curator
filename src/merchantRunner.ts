@@ -12,7 +12,12 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { addressGroupRegistryAbi } from "./contracts.js";
-import { IndexerClient, type MakerPlatformStatsRow } from "./indexer.js";
+import {
+  type BlockPinnedMembershipSnapshot,
+  type BlockPinnedMerchantSnapshot,
+  IndexerClient,
+  type MakerPlatformStatsRow,
+} from "./indexer.js";
 import type { Logger } from "./logger.js";
 import type { MerchantRuntimeSettings } from "./merchantConfig.js";
 import {
@@ -27,6 +32,13 @@ import { choosePinnedSnapshotBlock } from "./runner.js";
 interface StableMerchantSnapshot {
   policy: MerchantPolicySnapshot;
   rowsDigest: Hex;
+  indexedThroughBlock: bigint;
+}
+
+interface PinnedMerchantReconciliation {
+  policy: MerchantPolicySnapshot;
+  merchantEvidenceDigest: Hex;
+  membership: BlockPinnedMembershipSnapshot;
   indexedThroughBlock: bigint;
 }
 
@@ -63,6 +75,51 @@ async function loadStableMerchantSnapshot(indexer: IndexerClient): Promise<Stabl
     }
   }
   throw new Error("MakerPlatformStats changed during all stable-snapshot attempts");
+}
+
+async function loadPinnedMerchantReconciliation(input: {
+  indexer: IndexerClient;
+  snapshotBlock: bigint;
+  v2Environment: MerchantRuntimeSettings["v2HistoryEnvironment"];
+  registryAddress: Address;
+  groupId: Hex;
+  registryDeploymentBlock: bigint;
+}): Promise<PinnedMerchantReconciliation> {
+  const loadPass = (): Promise<[BlockPinnedMerchantSnapshot, BlockPinnedMembershipSnapshot]> =>
+    Promise.all([
+      input.indexer.getBlockPinnedMerchantSnapshot({
+        snapshotBlock: input.snapshotBlock,
+        v2Environment: input.v2Environment,
+      }),
+      input.indexer.getBlockPinnedMembershipSnapshot({
+        registryAddress: input.registryAddress,
+        groupIds: [input.groupId],
+        deploymentBlock: input.registryDeploymentBlock,
+        snapshotBlock: input.snapshotBlock,
+      }),
+    ]);
+  const [firstMerchant, firstMembership] = await loadPass();
+  const firstWatermark = await input.indexer.getIndexedThroughBlock();
+  if (firstWatermark < input.snapshotBlock) {
+    throw new Error("Indexer watermark fell below the merchant snapshot block");
+  }
+  const [secondMerchant, secondMembership] = await loadPass();
+  const secondWatermark = await input.indexer.getIndexedThroughBlock();
+  if (secondWatermark < input.snapshotBlock) {
+    throw new Error("Indexer watermark fell below the merchant snapshot block");
+  }
+  if (
+    firstMerchant.evidenceDigest !== secondMerchant.evidenceDigest ||
+    firstMembership.evidenceDigest !== secondMembership.evidenceDigest
+  ) {
+    throw new Error("Indexer event evidence changed between merchant snapshot passes");
+  }
+  return {
+    policy: calculateTopChargebackMerchants(secondMerchant.makerPlatformStats),
+    merchantEvidenceDigest: secondMerchant.evidenceDigest,
+    membership: secondMembership,
+    indexedThroughBlock: secondWatermark,
+  };
 }
 
 function chunks<T>(values: T[], size: number): T[][] {
@@ -190,25 +247,28 @@ export async function runMerchant(
   }
 
   if (!settings.group) throw new Error("Merchant group configuration is required");
-  const [rpcLatestBlock, merchantSnapshot] = await Promise.all([
+  const [rpcLatestBlock, indexedThroughBlock] = await Promise.all([
     publicClient.getBlockNumber(),
-    loadStableMerchantSnapshot(indexer),
+    indexer.getIndexedThroughBlock(),
   ]);
   const snapshotBlock = choosePinnedSnapshotBlock({
-    indexedThroughBlock: merchantSnapshot.indexedThroughBlock,
+    indexedThroughBlock,
     rpcLatestBlock,
     confirmationBlocks: BigInt(settings.snapshotConfirmations),
   });
   if (settings.group.registryDeploymentBlock > snapshotBlock) {
     throw new Error("Registry deployment block is greater than the selected snapshot");
   }
-  assertMerchantGroupBounds(settings, merchantSnapshot.policy);
-  const membershipSnapshot = await indexer.getBlockPinnedMembershipSnapshot({
-    registryAddress: settings.group.registryAddress,
-    groupIds: [settings.group.groupId],
-    deploymentBlock: settings.group.registryDeploymentBlock,
+  const merchantSnapshot = await loadPinnedMerchantReconciliation({
+    indexer,
     snapshotBlock,
+    v2Environment: settings.v2HistoryEnvironment,
+    registryAddress: settings.group.registryAddress,
+    groupId: settings.group.groupId,
+    registryDeploymentBlock: settings.group.registryDeploymentBlock,
   });
+  assertMerchantGroupBounds(settings, merchantSnapshot.policy);
+  const membershipSnapshot = merchantSnapshot.membership;
   const current = membershipSnapshot.membership.membersByGroupId.get(settings.group.groupId);
   if (!current) throw new Error("Indexer omitted merchant group membership");
   const governance = await readGovernance(
@@ -243,7 +303,7 @@ export async function runMerchant(
       rpcLatestBlock: rpcLatestBlock.toString(),
       snapshotBlock: snapshotBlock.toString(),
       indexedThroughBlock: merchantSnapshot.indexedThroughBlock.toString(),
-      evidenceDigest: merchantSnapshot.rowsDigest,
+      evidenceDigest: merchantSnapshot.merchantEvidenceDigest,
       membershipEvidenceDigest: membershipSnapshot.evidenceDigest,
       sourceRows: merchantSnapshot.policy.sourceRows,
       desiredCount: merchantSnapshot.policy.members.size,

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   getV2ChargebackVerifierMap,
   reconstructMembership,
+  reconstructMerchantPlatformRows,
   reconstructPlatformRows,
+  V2_HISTORY_ESCROW_BY_ENVIRONMENT,
 } from "../src/blockPinnedSnapshot.js";
 import { normalizeGroupId } from "../src/domain.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASHES } from "../src/paymentMethods.js";
@@ -10,6 +12,7 @@ import { CHARGEBACKABLE_PAYMENT_METHOD_HASHES } from "../src/paymentMethods.js";
 const chainId = 8453;
 const snapshotBlock = 49_000_000n;
 const taker = "0x1111111111111111111111111111111111111111";
+const maker = "0x2222222222222222222222222222222222222222";
 const groupId = normalizeGroupId(`0x${"22".repeat(32)}`);
 const intent = (suffix: string) => `0x${suffix.repeat(64)}`;
 const eventId = (logIndex: number) => `8453_48999999_${logIndex}`;
@@ -69,6 +72,89 @@ describe("block-pinned event reconstruction", () => {
       rows.find((row) => row.paymentMethodHash === CHARGEBACKABLE_PAYMENT_METHOD_HASHES.venmo)
         ?.totalAmountTaken,
     ).toBe(100000000n);
+  });
+
+  it("reconstructs non-manual maker volume at the pinned block", () => {
+    const unifiedEscrow = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const rows = reconstructMerchantPlatformRows({
+      chainId,
+      snapshotBlock,
+      v2Environment: "prod",
+      deposits: [
+        {
+          id: `${V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod}_1`,
+          chainId,
+          escrowAddress: V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod,
+          depositId: "1",
+          depositor: maker,
+        },
+        {
+          id: `${unifiedEscrow}_2`,
+          chainId,
+          escrowAddress: unifiedEscrow,
+          depositId: "2",
+          depositor: maker,
+        },
+      ],
+      v2Signals: [
+        {
+          id: eventId(1),
+          intentHash: intent("1"),
+          depositId: "1",
+          verifier: paypalV2Verifier,
+          amount: "300000000",
+        },
+      ],
+      v2Fulfillments: [
+        {
+          id: eventId(2),
+          intentHash: intent("1"),
+          depositId: "1",
+          verifier: paypalV2Verifier,
+          amount: "299000000",
+        },
+      ],
+      unifiedSignals: [
+        {
+          id: eventId(3),
+          intentHash: intent("2"),
+          escrow: unifiedEscrow,
+          depositId: "2",
+          paymentMethod: CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal,
+        },
+        {
+          id: eventId(5),
+          intentHash: intent("3"),
+          escrow: unifiedEscrow,
+          depositId: "2",
+          paymentMethod: CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal,
+        },
+      ],
+      unifiedFulfillments: [
+        {
+          id: eventId(4),
+          intentHash: intent("2"),
+          amount: "900000000",
+          isManualRelease: true,
+        },
+        {
+          id: eventId(6),
+          intentHash: intent("3"),
+          amount: "200000000",
+          isManualRelease: false,
+        },
+      ],
+    });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        maker,
+        paymentMethodHash: CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal,
+        totalAmountTaken: 500000000n,
+        nonManualReleaseVolume: 500000000n,
+        manualReleaseVolume: 0n,
+      }),
+    ]);
   });
 
   it("ignores pending chargeback signals and classified non-chargeback fulfillments", () => {
