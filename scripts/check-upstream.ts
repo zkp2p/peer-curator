@@ -180,7 +180,6 @@ function checkV2SourceBinding(input: {
   environment: V2HistoryEnvironment;
   config: string;
   paymentMethods: string;
-  allowDisabledSource: boolean;
 }): SurfaceCheck {
   const deploymentStart = input.paymentMethods.indexOf(`  ${input.environment}: {`);
   const deploymentEnd =
@@ -203,9 +202,7 @@ function checkV2SourceBinding(input: {
   const sourceMatches =
     configuredEscrow !== undefined &&
     mappedEscrow !== undefined &&
-    (configuredEscrow.toLowerCase() === mappedEscrow.toLowerCase() ||
-      (input.allowDisabledSource &&
-        configuredEscrow.toLowerCase() === "0x0000000000000000000000000000000000000000"));
+    configuredEscrow.toLowerCase() === mappedEscrow.toLowerCase();
   const missing = V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.filter(
     ([, , environment]) => environment === input.environment,
   )
@@ -526,13 +523,11 @@ const runtimeChecks = [
     environment: "staging",
     config: mainIndexerStagingConfig,
     paymentMethods: mainIndexerPaymentMethods,
-    allowDisabledSource: true,
   }),
   checkV2SourceBinding({
     environment: "prod",
     config: mainIndexerProductionConfig,
     paymentMethods: mainIndexerPaymentMethods,
-    allowDisabledSource: false,
   }),
 ];
 
