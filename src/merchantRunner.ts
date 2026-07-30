@@ -23,7 +23,7 @@ import type { MerchantRuntimeSettings } from "./merchantConfig.js";
 import {
   budgetMerchantAdditions,
   buildMerchantAdditions,
-  calculateTopChargebackMerchants,
+  calculatePeerMakers,
   type MerchantPolicySnapshot,
 } from "./merchantPolicy.js";
 import {
@@ -74,7 +74,7 @@ async function loadStableMerchantSnapshot(indexer: IndexerClient): Promise<Stabl
     const secondDigest = digestRows(secondRows);
     if (middle >= before && after >= middle && firstDigest === secondDigest) {
       return {
-        policy: calculateTopChargebackMerchants(secondRows),
+        policy: calculatePeerMakers(secondRows),
         rowsDigest: secondDigest,
         indexedThroughBlock: after,
       };
@@ -121,7 +121,7 @@ async function loadPinnedMerchantReconciliation(input: {
     throw new Error("Indexer event evidence changed between merchant snapshot passes");
   }
   return {
-    policy: calculateTopChargebackMerchants(secondMerchant.makerPlatformStats),
+    policy: calculatePeerMakers(secondMerchant.makerPlatformStats),
     merchantEvidenceDigest: secondMerchant.evidenceDigest,
     membership: secondMembership,
     indexedThroughBlock: secondWatermark,
@@ -204,7 +204,7 @@ export async function runMerchant(
         qualifyingVolumeUsdc: (snapshot.policy.qualifyingVolume / 1_000_000n).toString(),
         indexerAccess: settings.indexerApiKey ? "api-key" : "public-rate-limited",
       },
-      "Top chargeback merchant snapshot calculated",
+      "Peer Makers snapshot calculated",
     );
     return;
   }
@@ -247,7 +247,7 @@ export async function runMerchant(
         transactionHash: created.transactionHash,
         blockNumber: created.blockNumber.toString(),
       },
-      "Top chargeback merchant group created",
+      "Peer Makers group created",
     );
     return;
   }
@@ -328,7 +328,7 @@ export async function runMerchant(
       initialSeed,
       execute: settings.command === "sync" && settings.execute,
     },
-    "Top chargeback merchant initialization plan",
+    "Peer Makers initialization plan",
   );
   if (settings.command !== "sync" || !settings.execute || mutations.length === 0) return;
   if (!settings.groupAdminPrivateKey) {
@@ -374,8 +374,5 @@ export async function runMerchant(
       );
     },
   });
-  logger.info(
-    { transactionCount: transactionHashes.length },
-    "Top chargeback merchant seed completed",
-  );
+  logger.info({ transactionCount: transactionHashes.length }, "Peer Makers seed completed");
 }

@@ -4,8 +4,8 @@ Calculates and maintains the three-tier, cascading `historical-taker` policy
 family in `AddressGroupRegistry`. Current-Earn tiers are intentionally not
 calculated or reconciled.
 
-It also ships a separate, manual initializer for the single `Top Chargeback
-Merchants` group. That initializer is not wired into the 12-hour taker cron.
+It also ships a separate, manual initializer for the single `Peer Makers`
+group. That initializer is not wired into the 12-hour taker cron.
 
 The service pulls environment-matched indexer aggregates, excludes wallets whose
 address hashes are in the committed denylist, calculates desired membership,
@@ -55,7 +55,7 @@ contribute zero. `TakerStats.totalFulfilledVolume`, cancellation volume, and
 lock-score data are not queried or used. There are no address-specific tier
 overrides.
 
-## Top Chargeback Merchants
+## Peer Makers
 
 The one-time merchant cohort contains makers with at least $10,000 in all-time
 non-manual-release volume across exactly PayPal, Venmo, and Cash App.
@@ -83,6 +83,12 @@ any member outside the calculated cohort. It never removes merchant members.
 This policy has no refresh cadence. The commands are deliberately absent from
 the deployed service start command and scheduled cron; run them only for a
 reviewed initialization.
+
+The deployed staging and shared preproduction/production-contract groups were
+originally created with the event-only label `Top Chargeback Merchants`. The
+registry does not store or support updating group names, so those historical
+`GroupCreated` events remain immutable. The group IDs and membership policy are
+unchanged; `Peer Makers` is the canonical repository and published-list name.
 
 ## Static blocked-wallet snapshot
 

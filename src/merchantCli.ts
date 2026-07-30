@@ -14,9 +14,6 @@ const logger = createLogger(settings.logLevel);
 try {
   await runMerchant(settings, logger);
 } catch (error) {
-  logger.fatal(
-    { error: summarizeError(error) },
-    "Top chargeback merchant initialization failed closed",
-  );
+  logger.fatal({ error: summarizeError(error) }, "Peer Makers initialization failed closed");
   process.exitCode = 1;
 }
