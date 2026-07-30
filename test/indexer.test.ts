@@ -445,3 +445,147 @@ describe("IndexerClient address-group membership", () => {
     ).rejects.toThrow("memberCount does not match");
   });
 });
+
+describe("IndexerClient atomic reconciliation snapshot", () => {
+  const registryAddress = normalizeAddress("0x9999999999999999999999999999999999999999");
+  const groupId = normalizeGroupId(`0x${"11".repeat(32)}`);
+  const member = normalizeAddress("0x2222222222222222222222222222222222222222");
+  const platformRow = {
+    id: `8453_${taker}_${paypalHash}`,
+    chainId: 8453,
+    taker,
+    paymentMethodHash: paypalHash,
+    totalAmountTaken: "500000000",
+  };
+  const groupRow = {
+    id: `8453_${registryAddress}_${groupId}`,
+    chainId: 8453,
+    registryAddress,
+    groupId,
+    memberCount: 1,
+  };
+  const memberRow = {
+    id: `8453_${registryAddress}_${groupId}_${member}`,
+    chainId: 8453,
+    registryAddress,
+    groupId,
+    groupEntityId: `8453_${registryAddress}_${groupId}`,
+    member,
+  };
+
+  function atomicPayload(input?: {
+    nonContiguousPlatformPage?: boolean;
+    platformOverflow?: boolean;
+  }): Record<string, unknown> {
+    const data: Record<string, unknown> = {
+      chain_metadata: [{ chain_id: 8453, latest_processed_block: 120 }],
+      AddressGroup: [groupRow],
+    };
+    for (let index = 0; index < 11; index += 1) {
+      data[`platformPage${index}`] =
+        index === 0 ||
+        (index === 1 && input?.nonContiguousPlatformPage) ||
+        (index === 10 && input?.platformOverflow)
+          ? [platformRow]
+          : [];
+    }
+    for (let index = 0; index < 6; index += 1) {
+      data[`memberPage${index}`] = index === 0 ? [memberRow] : [];
+    }
+    return data;
+  }
+
+  it("reads watermark, aggregates, groups, and members in one GraphQL request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: atomicPayload() }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const snapshot = await client.getAtomicReconciliationSnapshot({
+      registryAddress,
+      groupIds: [groupId],
+      deploymentBlock: 100n,
+      paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(snapshot.membership.snapshotBlock).toBe(120n);
+    expect(snapshot.membership.membersByGroupId.get(groupId)).toEqual(new Set([member]));
+    expect(snapshot.takerPlatformStats).toHaveLength(1);
+    const firstCall = fetchMock.mock.calls[0];
+    if (!firstCall) throw new Error("Expected one GraphQL request");
+    const request = JSON.parse(String((firstCall[1] as RequestInit).body));
+    expect(request.query).toContain("AtomicReconciliationSnapshot");
+    expect(request.query).toContain("platformPage10:");
+    expect(request.query).toContain("memberPage5:");
+    expect(request.query).toContain("chain_metadata");
+  });
+
+  it("fails closed when a page appears after an earlier short page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            data: atomicPayload({ nonContiguousPlatformPage: true }),
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getAtomicReconciliationSnapshot({
+        registryAddress,
+        groupIds: [groupId],
+        deploymentBlock: 100n,
+        paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+      }),
+    ).rejects.toThrow("non-contiguous TakerPlatformStats pages");
+  });
+
+  it("fails closed when the explicit overflow page is nonempty", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: atomicPayload({ platformOverflow: true }) }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getAtomicReconciliationSnapshot({
+        registryAddress,
+        groupIds: [groupId],
+        deploymentBlock: 100n,
+        paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+      }),
+    ).rejects.toThrow("TakerPlatformStats safety limit");
+  });
+});

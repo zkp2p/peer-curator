@@ -1,12 +1,13 @@
 import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
-import { calculateDesiredSnapshot } from "./calculate.js";
+import { calculateDesiredSnapshot, calculateDesiredSnapshotFromRows } from "./calculate.js";
 import type { RuntimeSettings } from "./config.js";
 import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
 import { IndexerClient } from "./indexer.js";
 import type { Logger } from "./logger.js";
 import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
+import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "./phases.js";
 import {
   assertDesiredSnapshotBounds,
@@ -17,22 +18,11 @@ import {
 } from "./reconcile.js";
 import { isBlockedWallet } from "./staticWalletRules.js";
 
-export class IndexerSnapshotAdvancedError extends Error {
-  public constructor() {
-    super("Indexer advanced while the reconciliation snapshot was being read");
-    this.name = "IndexerSnapshotAdvancedError";
-  }
-}
-
 export function assertPinnedIndexerSnapshot(input: {
   snapshotBlock: bigint;
-  finalIndexedBlock: bigint;
   rpcLatestBlock: bigint;
   confirmationBlocks: bigint;
 }): void {
-  if (input.finalIndexedBlock !== input.snapshotBlock) {
-    throw new IndexerSnapshotAdvancedError();
-  }
   if (
     input.rpcLatestBlock < input.confirmationBlocks ||
     input.snapshotBlock > input.rpcLatestBlock - input.confirmationBlocks
@@ -53,8 +43,21 @@ export async function run(
     settings.requestTimeoutMs,
   );
   const reconciliationRun = settings.command === "plan" || settings.command === "sync";
-  const pinnedIndexerBlock = reconciliationRun ? await indexer.getIndexedThroughBlock() : undefined;
-  const desired = await calculateDesiredSnapshot(settings, indexer);
+  if (reconciliationRun && !settings.groups) {
+    throw new Error("Group configuration is required");
+  }
+  const atomicSnapshot =
+    reconciliationRun && settings.groups
+      ? await indexer.getAtomicReconciliationSnapshot({
+          registryAddress: settings.groups.registryAddress,
+          groupIds: settings.groups.groups.map((group) => group.groupId),
+          deploymentBlock: settings.groups.registryDeploymentBlock,
+          paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+        })
+      : undefined;
+  const desired = atomicSnapshot
+    ? calculateDesiredSnapshotFromRows(settings, atomicSnapshot.takerPlatformStats)
+    : await calculateDesiredSnapshot(settings, indexer);
 
   logger.info(
     {
@@ -101,21 +104,12 @@ export async function run(
   if (rpcChainId !== settings.chainId) {
     throw new Error("RPC chain does not match CHAIN_ID");
   }
-  if (pinnedIndexerBlock === undefined) {
-    throw new Error("Indexer snapshot block is unavailable");
-  }
+  if (!atomicSnapshot) throw new Error("Atomic indexer snapshot is unavailable");
   const confirmationBlocks = BigInt(settings.snapshotConfirmations);
-  const membership = await indexer.getAddressGroupMembershipSnapshot({
-    registryAddress: groups.registryAddress,
-    groupIds: groups.groups.map((group) => group.groupId),
-    deploymentBlock: groups.registryDeploymentBlock,
-    snapshotBlock: pinnedIndexerBlock,
-  });
-  const finalIndexerBlock = await indexer.getIndexedThroughBlock();
+  const membership = atomicSnapshot.membership;
   const rpcLatestBlock = await publicClient.getBlockNumber();
   assertPinnedIndexerSnapshot({
-    snapshotBlock: pinnedIndexerBlock,
-    finalIndexedBlock: finalIndexerBlock,
+    snapshotBlock: membership.snapshotBlock,
     rpcLatestBlock,
     confirmationBlocks,
   });
@@ -215,30 +209,4 @@ export async function run(
     { phase, transactionCount: transactionHashes.length },
     "On-chain group reconciliation completed",
   );
-}
-
-export async function runWithSnapshotRetries(
-  settings: RuntimeSettings,
-  logger: Logger,
-  verifyAddress?: string,
-  operation: typeof run = run,
-): Promise<void> {
-  for (let attempt = 1; attempt <= settings.snapshotMaxAttempts; attempt += 1) {
-    try {
-      await operation(settings, logger, verifyAddress);
-      return;
-    } catch (error) {
-      if (
-        !(error instanceof IndexerSnapshotAdvancedError) ||
-        attempt === settings.snapshotMaxAttempts
-      ) {
-        throw error;
-      }
-      logger.warn(
-        { attempt, maxAttempts: settings.snapshotMaxAttempts },
-        "Indexer advanced during snapshot; retrying the read-only reconciliation phase",
-      );
-      await new Promise((resolve) => setTimeout(resolve, settings.snapshotRetryDelayMs));
-    }
-  }
 }

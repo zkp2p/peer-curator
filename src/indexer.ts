@@ -15,6 +15,11 @@ export interface IndexedMembershipSnapshot {
   indexedThroughBlock: bigint;
 }
 
+export interface AtomicReconciliationSnapshot {
+  takerPlatformStats: TakerPlatformStatsRow[];
+  membership: IndexedMembershipSnapshot;
+}
+
 interface GraphQlError {
   message?: string;
 }
@@ -55,6 +60,10 @@ interface RawChainMetadata {
 }
 
 const PAGE_SIZE = 1_000;
+const ATOMIC_PLATFORM_PAGE_COUNT = 11;
+const ATOMIC_MEMBER_PAGE_COUNT = 6;
+const MAX_ATOMIC_PLATFORM_ROWS = (ATOMIC_PLATFORM_PAGE_COUNT - 1) * PAGE_SIZE;
+const MAX_ATOMIC_MEMBER_ROWS = (ATOMIC_MEMBER_PAGE_COUNT - 1) * PAGE_SIZE;
 const MAX_RETRIES = 5;
 const PUBLIC_REQUEST_INTERVAL_MS = 650;
 
@@ -240,12 +249,14 @@ export class IndexerClient {
     return rows;
   }
 
-  public async getAddressGroupMembershipSnapshot(input: {
+  private buildMembershipSnapshot(input: {
     registryAddress: Address;
     groupIds: GroupId[];
     deploymentBlock: bigint;
     snapshotBlock: bigint;
-  }): Promise<IndexedMembershipSnapshot> {
+    groups: RawAddressGroup[];
+    rawMembers: RawAddressGroupMember[];
+  }): IndexedMembershipSnapshot {
     const uniqueGroupIds = [...new Set(input.groupIds)];
     if (uniqueGroupIds.length === 0) {
       throw new Error("At least one address group is required");
@@ -254,23 +265,12 @@ export class IndexerClient {
       throw new Error("Registry deployment block is greater than the requested chain snapshot");
     }
 
-    const [groups, rawMembers] = await Promise.all([
-      this.getConfiguredAddressGroups({
-        registryAddress: input.registryAddress,
-        groupIds: uniqueGroupIds,
-      }),
-      this.getConfiguredAddressGroupMembers({
-        registryAddress: input.registryAddress,
-        groupIds: uniqueGroupIds,
-      }),
-    ]);
-
     const configuredIds = new Set<GroupId>(uniqueGroupIds);
     const indexedGroups = new Map<GroupId, RawAddressGroup>();
-    if (groups.length > configuredIds.size) {
+    if (input.groups.length > configuredIds.size) {
       throw new Error("Indexer returned an invalid configured group row count");
     }
-    for (const group of groups) {
+    for (const group of input.groups) {
       const registryAddress = normalizeAddress(
         group.registryAddress,
         "AddressGroup.registryAddress",
@@ -289,7 +289,7 @@ export class IndexerClient {
       }
       indexedGroups.set(groupId, group);
     }
-    if (indexedGroups.size !== groups.length) {
+    if (indexedGroups.size !== input.groups.length) {
       throw new Error("Indexer returned duplicate configured group rows");
     }
     if (
@@ -303,7 +303,7 @@ export class IndexerClient {
       uniqueGroupIds.map((groupId) => [groupId, new Set<Address>()]),
     );
     const seenIds = new Set<string>();
-    for (const row of rawMembers) {
+    for (const row of input.rawMembers) {
       if (!row.id || seenIds.has(row.id)) {
         throw new Error("Indexer returned a duplicate or invalid address-group member id");
       }
@@ -356,9 +356,40 @@ export class IndexerClient {
     };
   }
 
-  public async getTakerPlatformStats(
-    paymentMethodHashes: ReadonlySet<Hex>,
-  ): Promise<TakerPlatformStatsRow[]> {
+  public async getAddressGroupMembershipSnapshot(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    deploymentBlock: bigint;
+    snapshotBlock: bigint;
+  }): Promise<IndexedMembershipSnapshot> {
+    const uniqueGroupIds = [...new Set(input.groupIds)];
+    if (uniqueGroupIds.length === 0) {
+      throw new Error("At least one address group is required");
+    }
+    if (input.deploymentBlock > input.snapshotBlock) {
+      throw new Error("Registry deployment block is greater than the requested chain snapshot");
+    }
+
+    const [groups, rawMembers] = await Promise.all([
+      this.getConfiguredAddressGroups({
+        registryAddress: input.registryAddress,
+        groupIds: uniqueGroupIds,
+      }),
+      this.getConfiguredAddressGroupMembers({
+        registryAddress: input.registryAddress,
+        groupIds: uniqueGroupIds,
+      }),
+    ]);
+
+    return this.buildMembershipSnapshot({
+      ...input,
+      groupIds: uniqueGroupIds,
+      groups,
+      rawMembers,
+    });
+  }
+
+  private validatePaymentMethodHashes(paymentMethodHashes: ReadonlySet<Hex>): Hex[] {
     if (paymentMethodHashes.size === 0) {
       throw new Error("At least one chargebackable payment-method hash is required");
     }
@@ -370,6 +401,241 @@ export class IndexerClient {
     ) {
       throw new Error("Chargebackable payment-method hashes are invalid or unknown");
     }
+    return configuredHashes;
+  }
+
+  private parseTakerPlatformStatsRows(
+    rawRows: RawTakerPlatformStats[],
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): TakerPlatformStatsRow[] {
+    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
+      throw new Error("Indexer returned duplicate TakerPlatformStats rows");
+    }
+
+    const rows = rawRows.map((row) => {
+      const taker = normalizeAddress(row.taker, "TakerPlatformStats.taker");
+      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
+      if (
+        row.chainId !== this.chainId ||
+        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
+        !paymentMethodHashes.has(paymentMethodHash)
+      ) {
+        throw new Error("Indexer returned an unexpected TakerPlatformStats row");
+      }
+      const canonicalId = `${this.chainId}_${taker}_${paymentMethodHash}`;
+      if (row.id.toLowerCase() !== canonicalId) {
+        throw new Error("Indexer returned an invalid TakerPlatformStats id");
+      }
+      if (typeof row.totalAmountTaken !== "string" || !/^\d+$/.test(row.totalAmountTaken)) {
+        throw new Error("Indexer returned invalid TakerPlatformStats.totalAmountTaken");
+      }
+      const totalAmountTaken = BigInt(row.totalAmountTaken);
+      if (totalAmountTaken < 0n) {
+        throw new Error("Indexer returned negative TakerPlatformStats.totalAmountTaken");
+      }
+      return {
+        id: canonicalId,
+        taker,
+        paymentMethodHash,
+        totalAmountTaken,
+      };
+    });
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("Indexer returned duplicate canonical TakerPlatformStats rows");
+    }
+    return rows;
+  }
+
+  /**
+   * Keep every mutable reconciliation root in this one query() call. Hasura
+   * compiles the GraphQL document to one SQL statement, so the co-read
+   * watermark, desired-volume rows, groups, and members share one database
+   * snapshot. Fixed aliases avoid follow-up requests while explicit overflow
+   * pages make the bounded result fail closed.
+   */
+  public async getAtomicReconciliationSnapshot(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    deploymentBlock: bigint;
+    paymentMethodHashes: ReadonlySet<Hex>;
+  }): Promise<AtomicReconciliationSnapshot> {
+    const configuredHashes = this.validatePaymentMethodHashes(input.paymentMethodHashes);
+    const uniqueGroupIds = [...new Set(input.groupIds)];
+    if (uniqueGroupIds.length === 0) {
+      throw new Error("At least one address group is required");
+    }
+
+    const platformPages = Array.from(
+      { length: ATOMIC_PLATFORM_PAGE_COUNT },
+      (_, index) => `
+        platformPage${index}: TakerPlatformStats(
+          where: {
+            chainId: { _eq: $chainId }
+            paymentMethodHash: { _in: $paymentMethodHashes }
+          }
+          order_by: { id: asc }
+          limit: $pageSize
+          offset: ${index * PAGE_SIZE}
+        ) {
+          id
+          chainId
+          taker
+          paymentMethodHash
+          totalAmountTaken
+        }
+      `,
+    ).join("\n");
+    const memberPages = Array.from(
+      { length: ATOMIC_MEMBER_PAGE_COUNT },
+      (_, index) => `
+        memberPage${index}: AddressGroupMember(
+          where: {
+            chainId: { _eq: $chainId }
+            registryAddress: { _ilike: $registryAddress }
+            groupId: { _in: $groupIds }
+          }
+          order_by: { id: asc }
+          limit: $pageSize
+          offset: ${index * PAGE_SIZE}
+        ) {
+          id
+          chainId
+          registryAddress
+          groupId
+          groupEntityId
+          member
+        }
+      `,
+    ).join("\n");
+    const query = `
+      query AtomicReconciliationSnapshot(
+        $chainId: Int!
+        $paymentMethodHashes: [String!]!
+        $registryAddress: String!
+        $groupIds: [String!]!
+        $pageSize: Int!
+        $groupLimit: Int!
+      ) {
+        chain_metadata(
+          where: { chain_id: { _eq: $chainId } }
+          limit: 2
+        ) {
+          chain_id
+          latest_processed_block
+        }
+        ${platformPages}
+        AddressGroup(
+          where: {
+            chainId: { _eq: $chainId }
+            registryAddress: { _ilike: $registryAddress }
+            groupId: { _in: $groupIds }
+          }
+          order_by: { id: asc }
+          limit: $groupLimit
+        ) {
+          id
+          chainId
+          registryAddress
+          groupId
+          memberCount
+        }
+        ${memberPages}
+      }
+    `;
+    const data = await this.query<Record<string, unknown>>(query, {
+      chainId: this.chainId,
+      paymentMethodHashes: configuredHashes,
+      registryAddress: input.registryAddress,
+      groupIds: uniqueGroupIds,
+      pageSize: PAGE_SIZE,
+      groupLimit: uniqueGroupIds.length + 1,
+    });
+
+    const metadataRows = data.chain_metadata;
+    if (!Array.isArray(metadataRows) || metadataRows.length !== 1) {
+      throw new Error("Indexer returned an invalid atomic snapshot metadata row count");
+    }
+    const metadata = metadataRows[0] as RawChainMetadata | undefined;
+    if (
+      !metadata ||
+      metadata.chain_id !== this.chainId ||
+      metadata.latest_processed_block === null ||
+      !Number.isSafeInteger(metadata.latest_processed_block) ||
+      metadata.latest_processed_block < 0
+    ) {
+      throw new Error("Indexer returned invalid atomic snapshot metadata");
+    }
+    const snapshotBlock = BigInt(metadata.latest_processed_block);
+
+    const collectPages = <T>(
+      prefix: string,
+      pageCount: number,
+      maximumRows: number,
+      label: string,
+    ): T[] => {
+      const rows: T[] = [];
+      let exhausted = false;
+      for (let index = 0; index < pageCount; index += 1) {
+        const page = data[`${prefix}${index}`];
+        if (!Array.isArray(page)) {
+          throw new Error(`Indexer response omitted ${prefix}${index}`);
+        }
+        if (page.length > PAGE_SIZE) {
+          throw new Error(`Indexer returned an oversized ${label} page`);
+        }
+        if (index === pageCount - 1) {
+          if (page.length > 0) {
+            throw new Error(`Atomic snapshot exceeds the ${label} safety limit`);
+          }
+          break;
+        }
+        if (exhausted && page.length > 0) {
+          throw new Error(`Atomic snapshot returned non-contiguous ${label} pages`);
+        }
+        rows.push(...(page as T[]));
+        if (page.length < PAGE_SIZE) exhausted = true;
+      }
+      if (rows.length > maximumRows) {
+        throw new Error(`Atomic snapshot exceeds the ${label} safety limit`);
+      }
+      return rows;
+    };
+    const rawPlatformRows = collectPages<RawTakerPlatformStats>(
+      "platformPage",
+      ATOMIC_PLATFORM_PAGE_COUNT,
+      MAX_ATOMIC_PLATFORM_ROWS,
+      "TakerPlatformStats",
+    );
+    const rawMembers = collectPages<RawAddressGroupMember>(
+      "memberPage",
+      ATOMIC_MEMBER_PAGE_COUNT,
+      MAX_ATOMIC_MEMBER_ROWS,
+      "AddressGroupMember",
+    );
+    if (!Array.isArray(data.AddressGroup)) {
+      throw new Error("Indexer response omitted AddressGroup");
+    }
+
+    return {
+      takerPlatformStats: this.parseTakerPlatformStatsRows(
+        rawPlatformRows,
+        input.paymentMethodHashes,
+      ),
+      membership: this.buildMembershipSnapshot({
+        registryAddress: input.registryAddress,
+        groupIds: uniqueGroupIds,
+        deploymentBlock: input.deploymentBlock,
+        snapshotBlock,
+        groups: data.AddressGroup as RawAddressGroup[],
+        rawMembers,
+      }),
+    };
+  }
+
+  public async getTakerPlatformStats(
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): Promise<TakerPlatformStatsRow[]> {
+    const configuredHashes = this.validatePaymentMethodHashes(paymentMethodHashes);
 
     const query = `
       query TakerPlatformStatsPage(
@@ -425,41 +691,6 @@ export class IndexerClient {
       after = next;
     }
 
-    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
-      throw new Error("Indexer returned duplicate TakerPlatformStats rows");
-    }
-
-    const rows = rawRows.map((row) => {
-      const taker = normalizeAddress(row.taker, "TakerPlatformStats.taker");
-      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
-      if (
-        row.chainId !== this.chainId ||
-        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
-        !paymentMethodHashes.has(paymentMethodHash)
-      ) {
-        throw new Error("Indexer returned an unexpected TakerPlatformStats row");
-      }
-      const canonicalId = `${this.chainId}_${taker}_${paymentMethodHash}`;
-      if (row.id.toLowerCase() !== canonicalId) {
-        throw new Error("Indexer returned an invalid TakerPlatformStats id");
-      }
-      if (typeof row.totalAmountTaken !== "string" || !/^\d+$/.test(row.totalAmountTaken)) {
-        throw new Error("Indexer returned invalid TakerPlatformStats.totalAmountTaken");
-      }
-      const totalAmountTaken = BigInt(row.totalAmountTaken);
-      if (totalAmountTaken < 0n) {
-        throw new Error("Indexer returned negative TakerPlatformStats.totalAmountTaken");
-      }
-      return {
-        id: canonicalId,
-        taker,
-        paymentMethodHash,
-        totalAmountTaken,
-      };
-    });
-    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
-      throw new Error("Indexer returned duplicate canonical TakerPlatformStats rows");
-    }
-    return rows;
+    return this.parseTakerPlatformStatsRows(rawRows, paymentMethodHashes);
   }
 }

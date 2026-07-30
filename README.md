@@ -94,8 +94,12 @@ Removing a pin returns that wallet to the calculated policy on the next sync.
 - Cascading groups: a member of a tier belongs to every lower tier in the same policy family.
   `assertCascadingSets` enforces this on every calculated snapshot.
 - Current curated state comes from `AddressGroup` and `AddressGroupMember`.
-- The indexer watermark is captured before any aggregate or membership read and
-  must remain unchanged through the final read.
+- For `plan` and `sync`, the watermark, qualifying aggregates, group rows, and
+  member rows are returned by one bounded GraphQL document. Hasura compiles the
+  document to one SQL statement, so every root field shares one database snapshot.
+- Fixed 1,000-row pages must be contiguous and their explicit overflow pages
+  must be empty. The run fails closed above 10,000 qualifying platform rows or
+  5,000 configured-group member rows.
 - That watermark must be at least `SNAPSHOT_CONFIRMATIONS` behind the RPC head;
   a fresh, unconfirmed indexer tip is never used.
 - Every configured group must exist, and its indexed `memberCount` must equal
@@ -203,9 +207,8 @@ Runtime credentials:
 - `GROUP_ADMIN_PRIVATE_KEY` — required only for execution.
 
 `SNAPSHOT_CONFIRMATIONS` is the minimum RPC confirmation depth required for
-the indexer's stable processed-block watermark. The reconciler uses that
-watermark as the snapshot; it does not require the indexer to catch up to the
-RPC head.
+the processed-block watermark returned inside the atomic indexer snapshot.
+The reconciler does not require the indexer to catch up to the RPC head.
 
 The private key must resolve to the curator returned by `getGroup` for every
 configured group.
@@ -232,22 +235,24 @@ set; a row is created on `MemberAdded` and deleted on `MemberRemoved`.
 
 For `plan` and `sync`, the service:
 
-1. Captures `chain_metadata.latest_processed_block`.
-2. Reads all qualifying `TakerPlatformStats` rows, the three `AddressGroup` rows, and every
-   matching `AddressGroupMember` row.
-3. Reads the watermark again and requires it to be unchanged, preventing a
-   reconciliation across two indexer states as far as the Envio/Hasura query
-   surface allows.
-4. Requires the pinned watermark not to be ahead of the RPC head. A nonzero
+1. Sends one GraphQL document containing `chain_metadata.latest_processed_block`,
+   all qualifying `TakerPlatformStats` fixed pages and an overflow page, the
+   three `AddressGroup` rows, and all matching `AddressGroupMember` fixed pages
+   and an overflow page.
+2. Requires pages to be contiguous and both overflow pages to be empty. Hasura
+   compiles the document to one SQL statement, so these roots cannot mix
+   indexer database states.
+3. Treats the co-read watermark as the chosen snapshot block and requires it
+   not to be ahead of the RPC head. A nonzero
    `SNAPSHOT_CONFIRMATIONS` can additionally require an indexer deployment
    that deliberately trails the chain; continuously synced deployments should
    leave it at `0`.
-5. Reads bytecode and `getGroup` governance at that exact block.
+4. Reads bytecode and `getGroup` governance at that exact block.
 
 The indexer surface is a hard dependency. Missing group rows, a member-count
-mismatch, a changed watermark, insufficient confirmations, or an unavailable
-field stops the run before a transaction can be built. There is no RPC-log
-fallback.
+mismatch, non-contiguous pages, a row-cap overflow, insufficient
+confirmations, or an unavailable field stops the run before a transaction can
+be built. There is no RPC-log fallback.
 
 Recommended rollout:
 
@@ -317,11 +322,9 @@ The Docker image executes one command and exits. `RUN_COMMAND` selects
 0 */12 * * *
 ```
 
-If the indexer advances while the desired aggregates and group membership are
-being read, the run remains fail-closed and retries the read-only snapshot
-phase up to `SNAPSHOT_MAX_ATTEMPTS` times. `SNAPSHOT_RETRY_DELAY_MS` controls
-the delay between attempts. Transactions are considered only after one
-unchanged, sufficiently confirmed snapshot has been captured.
+Each `plan` or `sync` run uses one atomic, sufficiently confirmed indexer
+snapshot. Transactions are considered only after its fixed and overflow pages,
+membership parity, block watermark, and pinned on-chain governance all validate.
 
 New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
 This mode needs only the indexer and can run before the registry groups,

@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { loadSettings } from "./config.js";
 import { createLogger, summarizeError } from "./logger.js";
-import { runWithSnapshotRetries } from "./runner.js";
+import { run } from "./runner.js";
 
 const command = z
   .enum(["calculate", "verify", "plan", "sync"])
@@ -13,7 +13,7 @@ const logger = createLogger(settings.logLevel);
 
 try {
   const verifyAddress = process.argv.slice(3).find((argument) => argument !== "--");
-  await runWithSnapshotRetries(settings, logger, verifyAddress);
+  await run(settings, logger, verifyAddress);
 } catch (error) {
   logger.fatal({ error: summarizeError(error) }, "Taker group reconciliation failed closed");
   process.exitCode = 1;

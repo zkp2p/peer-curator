@@ -73,8 +73,6 @@ const envSchema = z.object({
   ALLOW_INITIAL_SEED: booleanFromString,
   BATCH_SIZE: positiveInteger("100"),
   SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("0"),
-  SNAPSHOT_MAX_ATTEMPTS: positiveInteger("20"),
-  SNAPSHOT_RETRY_DELAY_MS: nonNegativeInteger("250"),
   MAX_PLANNED_ADDS: nonNegativeInteger("1500"),
   MAX_EXECUTED_ADDS_PER_RUN: positiveInteger("1000"),
   MAX_TOTAL_REMOVALS: nonNegativeInteger("100"),
@@ -122,8 +120,6 @@ export interface RuntimeSettings {
   allowInitialSeed: boolean;
   batchSize: number;
   snapshotConfirmations: number;
-  snapshotMaxAttempts: number;
-  snapshotRetryDelayMs: number;
   maxPlannedAdds: number;
   maxExecutedAddsPerRun: number;
   maxRemovalWallets: number;
@@ -246,8 +242,6 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
     allowInitialSeed: env.ALLOW_INITIAL_SEED,
     batchSize: env.BATCH_SIZE,
     snapshotConfirmations: env.SNAPSHOT_CONFIRMATIONS,
-    snapshotMaxAttempts: env.SNAPSHOT_MAX_ATTEMPTS,
-    snapshotRetryDelayMs: env.SNAPSHOT_RETRY_DELAY_MS,
     maxPlannedAdds: env.MAX_PLANNED_ADDS,
     maxExecutedAddsPerRun: env.MAX_EXECUTED_ADDS_PER_RUN,
     maxRemovalWallets: env.MAX_REMOVAL_WALLETS,
