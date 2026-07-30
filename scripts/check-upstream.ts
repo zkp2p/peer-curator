@@ -116,6 +116,55 @@ function checkLegacyVerifierMapping(content: string): SurfaceCheck {
   };
 }
 
+function checkV2SourceBinding(input: {
+  environment: V2HistoryEnvironment;
+  config: string;
+  paymentMethods: string;
+  allowDisabledSource: boolean;
+}): SurfaceCheck {
+  const deploymentStart = input.paymentMethods.indexOf(`  ${input.environment}: {`);
+  const deploymentEnd =
+    input.environment === "staging"
+      ? input.paymentMethods.indexOf("\n  prod: {", deploymentStart)
+      : input.paymentMethods.indexOf("\n};", deploymentStart);
+  const deploymentSection =
+    deploymentStart >= 0 && deploymentEnd > deploymentStart
+      ? input.paymentMethods.slice(deploymentStart, deploymentEnd)
+      : "";
+  const mappedEscrow = /v2Escrow:\s*"(0x[0-9a-fA-F]{40})"\.toLowerCase\(\)/.exec(
+    deploymentSection,
+  )?.[1];
+  const configuredEscrow = /- name: Escrow_V2\s*\n\s+address:\s*["'](0x[0-9a-fA-F]{40})["']/m.exec(
+    input.config,
+  )?.[1];
+  const sourceMatches =
+    configuredEscrow !== undefined &&
+    mappedEscrow !== undefined &&
+    (configuredEscrow.toLowerCase() === mappedEscrow.toLowerCase() ||
+      (input.allowDisabledSource &&
+        configuredEscrow.toLowerCase() === "0x0000000000000000000000000000000000000000"));
+  const missing = V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.filter(
+    ([, , environment]) => environment === input.environment,
+  )
+    .filter(
+      ([verifier, method]) =>
+        !new RegExp(`"${verifier}"\\s*:\\s*\\n?\\s*lookups\\.nameToHash\\.${method}`, "i").test(
+          deploymentSection,
+        ),
+    )
+    .map(([, method]) => `${input.environment} V2 ${method} verifier mapping`);
+  if (!sourceMatches) {
+    missing.push(`${input.environment} Escrow_V2 source bound to its verifier mapping`);
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: `${input.environment} V2 source/verifier binding`,
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
+  };
+}
+
 const contractSource = show(
   contractsRepo,
   "origin/main",
@@ -238,6 +287,18 @@ const runtimeChecks = [
     ],
   }),
   checkLegacyVerifierMapping(mainIndexerPaymentMethods),
+  checkV2SourceBinding({
+    environment: "staging",
+    config: mainIndexerStagingConfig,
+    paymentMethods: mainIndexerPaymentMethods,
+    allowDisabledSource: true,
+  }),
+  checkV2SourceBinding({
+    environment: "prod",
+    config: mainIndexerProductionConfig,
+    paymentMethods: mainIndexerPaymentMethods,
+    allowDisabledSource: false,
+  }),
 ];
 
 const forwardChecks: SurfaceCheck[] = [];
