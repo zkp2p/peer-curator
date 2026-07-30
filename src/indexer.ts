@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import type { Address, Hex } from "viem";
 import {
   buildPinnedEventIdBounds,
-  getV2ChargebackVerifierMap,
   type RawGroupCreatedEvent,
   type RawMemberEvent,
   type RawUnifiedIntentFulfilled,
@@ -608,7 +607,7 @@ export class IndexerClient {
     snapshotBlock: bigint;
     v2Environment: V2HistoryEnvironment;
   }): Promise<BlockPinnedReconciliationSnapshot> {
-    const configuredHashes = this.validatePaymentMethodHashes(input.paymentMethodHashes);
+    this.validatePaymentMethodHashes(input.paymentMethodHashes);
     const uniqueGroupIds = [...new Set(input.groupIds)];
     if (uniqueGroupIds.length === 0 || uniqueGroupIds.length !== input.groupIds.length) {
       throw new Error("Address group ids must be non-empty and unique");
@@ -616,20 +615,6 @@ export class IndexerClient {
     if (input.deploymentBlock > input.snapshotBlock) {
       throw new Error("Registry deployment block is greater than the requested snapshot");
     }
-
-    const v2Verifiers = [...getV2ChargebackVerifierMap(input.v2Environment).keys()];
-    if (v2Verifiers.length !== 3) {
-      throw new Error("Legacy V2 chargeback verifier mapping is incomplete");
-    }
-    const v2VerifierWhere = v2Verifiers
-      .map((_, index) => `{ verifier: { _ilike: $v2Verifier${index} } }`)
-      .join(", ");
-    const v2VerifierDefinitions = v2Verifiers
-      .map((_, index) => `$v2Verifier${index}: String!`)
-      .join("\n");
-    const v2VerifierVariables = Object.fromEntries(
-      v2Verifiers.map((verifier, index) => [`v2Verifier${index}`, verifier]),
-    );
 
     const [
       v2Signals,
@@ -646,9 +631,6 @@ export class IndexerClient {
         selection: "id intentHash verifier owner",
         snapshotBlock: input.snapshotBlock,
         maximumRows: MAX_V2_SIGNAL_ROWS,
-        additionalWhere: `_or: [${v2VerifierWhere}]`,
-        variableDefinitions: v2VerifierDefinitions,
-        variables: v2VerifierVariables,
       }),
       this.getPinnedEventRows<RawV2IntentFulfilled>({
         root: "Escrow_V2_IntentFulfilled",
@@ -661,9 +643,6 @@ export class IndexerClient {
         selection: "id intentHash paymentMethod owner",
         snapshotBlock: input.snapshotBlock,
         maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
-        additionalWhere: "paymentMethod: { _in: $paymentMethodHashes }",
-        variableDefinitions: "$paymentMethodHashes: [String!]!",
-        variables: { paymentMethodHashes: configuredHashes },
       }),
       this.getPinnedEventRows<RawUnifiedIntentFulfilled>({
         root: "Orchestrator_V21_IntentFulfilled",

@@ -71,7 +71,7 @@ describe("block-pinned event reconstruction", () => {
     ).toBe(100000000n);
   });
 
-  it("ignores pending chargeback signals and unrelated fulfillments", () => {
+  it("ignores pending chargeback signals and classified non-chargeback fulfillments", () => {
     const rows = reconstructPlatformRows({
       chainId,
       snapshotBlock,
@@ -85,10 +85,30 @@ describe("block-pinned event reconstruction", () => {
           paymentMethod: CHARGEBACKABLE_PAYMENT_METHOD_HASHES.cashapp,
           owner: taker,
         },
+        {
+          id: eventId(2),
+          intentHash: intent("2"),
+          paymentMethod: `0x${"99".repeat(32)}`,
+          owner: taker,
+        },
       ],
-      unifiedFulfillments: [{ id: eventId(2), intentHash: intent("2"), amount: "500000000" }],
+      unifiedFulfillments: [{ id: eventId(3), intentHash: intent("2"), amount: "500000000" }],
     });
     expect(rows).toEqual([]);
+  });
+
+  it("fails closed on a fulfillment without its signal", () => {
+    expect(() =>
+      reconstructPlatformRows({
+        chainId,
+        snapshotBlock,
+        v2Environment: "prod",
+        v2Signals: [],
+        v2Fulfillments: [],
+        unifiedSignals: [],
+        unifiedFulfillments: [{ id: eventId(1), intentHash: intent("1"), amount: "100000000" }],
+      }),
+    ).toThrow("fulfillment without a matching intent signal");
   });
 
   it("fails closed on duplicate fulfillment events", () => {
@@ -112,7 +132,7 @@ describe("block-pinned event reconstruction", () => {
           { id: eventId(3), intentHash: intent("1"), amount: "100000000" },
         ],
       }),
-    ).toThrow("duplicate chargebackable fulfillment");
+    ).toThrow("duplicate fulfillment");
   });
 
   it("fails closed when a fulfillment does not follow its signal", () => {

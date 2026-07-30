@@ -136,6 +136,13 @@ function normalizeIntentHash(value: unknown): Hex {
   return value.toLowerCase() as Hex;
 }
 
+function normalizePaymentMethodHash(value: unknown): Hex {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    throw new Error("Indexer intent event has an invalid payment method hash");
+  }
+  return value.toLowerCase() as Hex;
+}
+
 function parseAmount(value: unknown): bigint {
   if (typeof value !== "string" || !/^\d+$/.test(value)) {
     throw new Error("Indexer fulfillment event has an invalid amount");
@@ -195,6 +202,18 @@ export function reconstructPlatformRows(input: {
     unifiedFulfillments,
   } = input;
   const v2ChargebackMethodByVerifier = getV2ChargebackVerifierMap(v2Environment);
+  const allV2ChargebackVerifiers = new Map<
+    string,
+    {
+      method: keyof typeof CHARGEBACKABLE_PAYMENT_METHOD_HASHES;
+      environment: V2HistoryEnvironment;
+    }
+  >(
+    V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.map(([verifier, method, environment]) => [
+      verifier,
+      { method, environment },
+    ]),
+  );
   if (v2ChargebackMethodByVerifier.size !== 3) {
     throw new Error("Legacy V2 chargeback verifier mapping is incomplete");
   }
@@ -207,7 +226,7 @@ export function reconstructPlatformRows(input: {
     Hex,
     {
       taker: Address;
-      paymentMethodHash: Hex;
+      paymentMethodHash?: Hex;
       version: "v2" | "unified";
       eventId: string;
     }
@@ -217,15 +236,21 @@ export function reconstructPlatformRows(input: {
     const intentHash = normalizeIntentHash(row.intentHash);
     const verifier = normalizeAddress(row.verifier, "V2 IntentSignaled.verifier");
     const methodName = v2ChargebackMethodByVerifier.get(verifier);
-    if (!methodName) {
-      throw new Error("Indexer returned an unexpected V2 verifier");
+    const knownChargebackVerifier = allV2ChargebackVerifiers.get(verifier);
+    if (
+      knownChargebackVerifier !== undefined &&
+      knownChargebackVerifier.environment !== v2Environment
+    ) {
+      throw new Error("Indexer returned a V2 chargeback verifier from the wrong environment");
     }
     if (signals.has(intentHash)) {
-      throw new Error("Indexer returned duplicate chargebackable intent signals");
+      throw new Error("Indexer returned duplicate intent signals");
     }
     signals.set(intentHash, {
       taker: normalizeAddress(row.owner, "V2 IntentSignaled.owner"),
-      paymentMethodHash: CHARGEBACKABLE_PAYMENT_METHOD_HASHES[methodName],
+      ...(methodName
+        ? { paymentMethodHash: CHARGEBACKABLE_PAYMENT_METHOD_HASHES[methodName] }
+        : {}),
       version: "v2",
       eventId: row.id,
     });
@@ -233,16 +258,16 @@ export function reconstructPlatformRows(input: {
 
   for (const row of unifiedSignals) {
     const intentHash = normalizeIntentHash(row.intentHash);
-    const paymentMethodHash = row.paymentMethod?.toLowerCase() as Hex;
-    if (!Object.values(CHARGEBACKABLE_PAYMENT_METHOD_HASHES).includes(paymentMethodHash)) {
-      throw new Error("Indexer returned an unexpected unified payment method");
-    }
+    const paymentMethodHash = normalizePaymentMethodHash(row.paymentMethod);
+    const isChargebackable = Object.values(CHARGEBACKABLE_PAYMENT_METHOD_HASHES).includes(
+      paymentMethodHash,
+    );
     if (signals.has(intentHash)) {
-      throw new Error("Indexer returned duplicate chargebackable intent signals");
+      throw new Error("Indexer returned duplicate intent signals");
     }
     signals.set(intentHash, {
       taker: normalizeAddress(row.owner, "unified IntentSignaled.owner"),
-      paymentMethodHash,
+      ...(isChargebackable ? { paymentMethodHash } : {}),
       version: "unified",
       eventId: row.id,
     });
@@ -263,7 +288,9 @@ export function reconstructPlatformRows(input: {
   }): void => {
     const intentHash = normalizeIntentHash(inputRow.intentHash);
     const signal = signals.get(intentHash);
-    if (!signal) return;
+    if (!signal) {
+      throw new Error("Indexer returned a fulfillment without a matching intent signal");
+    }
     if (signal.version !== inputRow.version) {
       throw new Error("Indexer returned a cross-version intent collision");
     }
@@ -271,9 +298,10 @@ export function reconstructPlatformRows(input: {
       throw new Error("Indexer returned a fulfillment at or before its intent signal");
     }
     if (fulfilledIntentHashes.has(intentHash)) {
-      throw new Error("Indexer returned duplicate chargebackable fulfillment");
+      throw new Error("Indexer returned duplicate fulfillment");
     }
     fulfilledIntentHashes.add(intentHash);
+    const amount = parseAmount(inputRow.amount);
     if (inputRow.owner !== undefined) {
       if (typeof inputRow.owner !== "string") {
         throw new Error("V2 fulfillment owner is invalid");
@@ -282,12 +310,13 @@ export function reconstructPlatformRows(input: {
         throw new Error("V2 signal and fulfillment owners do not match");
       }
     }
+    if (!signal.paymentMethodHash) return;
     const key = `${chainId}_${signal.taker}_${signal.paymentMethodHash}`;
     const existing = totals.get(key);
     totals.set(key, {
       taker: signal.taker,
       paymentMethodHash: signal.paymentMethodHash,
-      totalAmountTaken: (existing?.totalAmountTaken ?? 0n) + parseAmount(inputRow.amount),
+      totalAmountTaken: (existing?.totalAmountTaken ?? 0n) + amount,
     });
   };
 
