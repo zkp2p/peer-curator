@@ -79,7 +79,7 @@ const groupSchema = z
     registryDeploymentBlock: z.string().regex(/^\d+$/),
     groupId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
     minimumMembers: z.number().int().nonnegative(),
-    maximumMembers: z.number().int().positive(),
+    maximumMembers: z.number().int().nonnegative(),
   })
   .refine((group) => group.maximumMembers >= group.minimumMembers, {
     message: "maximumMembers must be greater than or equal to minimumMembers",
