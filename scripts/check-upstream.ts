@@ -12,6 +12,7 @@ interface SurfaceCheck {
 
 const workspaceCandidates = [
   ...(process.env.WORKSPACE_ROOT ? [resolve(process.env.WORKSPACE_ROOT)] : []),
+  resolve("../../.."),
   resolve("../../../../.."),
   resolve(".."),
   resolve("../.."),

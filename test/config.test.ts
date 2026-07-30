@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadSettings, parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
 
 function groupsFixture(): unknown {
@@ -18,6 +18,22 @@ function groupsFixture(): unknown {
     ),
   };
 }
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe("loadSettings", () => {
+  it("applies the bounded addition limits when environment overrides are absent", async () => {
+    vi.stubEnv("MAX_PLANNED_ADDS", undefined);
+    vi.stubEnv("MAX_EXECUTED_ADDS_PER_RUN", undefined);
+
+    const settings = await loadSettings("calculate");
+
+    expect(settings.maxPlannedAdds).toBe(1_500);
+    expect(settings.maxExecutedAddsPerRun).toBe(1_000);
+  });
+});
 
 describe("parseGroupsConfig", () => {
   it("accepts a complete three-group manifest", () => {
