@@ -12,20 +12,27 @@ interface SurfaceCheck {
 
 const workspaceCandidates = [
   ...(process.env.WORKSPACE_ROOT ? [resolve(process.env.WORKSPACE_ROOT)] : []),
+  resolve("../../../../.."),
   resolve(".."),
   resolve("../.."),
 ];
 const workspace =
   workspaceCandidates.find(
     (candidate) =>
-      existsSync(resolve(candidate, "zkp2p-v2-contracts")) &&
-      existsSync(resolve(candidate, "zkp2p-indexer")),
+      (existsSync(resolve(candidate, "projects/core/zkp2p-v2-contracts")) &&
+        existsSync(resolve(candidate, "projects/core/zkp2p-indexer"))) ||
+      (existsSync(resolve(candidate, "zkp2p-v2-contracts")) &&
+        existsSync(resolve(candidate, "zkp2p-indexer"))),
   ) ?? workspaceCandidates[0];
 if (!workspace) {
   throw new Error("Unable to resolve the workspace root");
 }
-const contractsRepo = resolve(workspace, "zkp2p-v2-contracts");
-const indexerRepo = resolve(workspace, "zkp2p-indexer");
+const contractsRepo = existsSync(resolve(workspace, "projects/core/zkp2p-v2-contracts"))
+  ? resolve(workspace, "projects/core/zkp2p-v2-contracts")
+  : resolve(workspace, "zkp2p-v2-contracts");
+const indexerRepo = existsSync(resolve(workspace, "projects/core/zkp2p-indexer"))
+  ? resolve(workspace, "projects/core/zkp2p-indexer")
+  : resolve(workspace, "zkp2p-indexer");
 
 function show(repo: string, ref: string, path: string): string {
   return execFileSync("git", ["-C", repo, "show", `${ref}:${path}`], {
@@ -74,6 +81,9 @@ const contractSource = show(
   "origin/main",
   "contracts/registries/AddressGroupRegistry.sol",
 );
+const contractPaymentMethodSources = ["paypal", "venmo", "cashapp"]
+  .map((name) => show(contractsRepo, "origin/main", `deployments/verifiers/${name}.ts`))
+  .join("\n");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
 const mainIndexerProductionConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
 const mainIndexerStagingConfig = show(indexerRepo, "origin/main", "config.base_staging.yaml");
@@ -99,11 +109,28 @@ const runtimeChecks = [
     ],
   }),
   check({
+    producer: "zkp2p-v2-contracts",
+    ref: "origin/main",
+    surface: "canonical chargebackable payment-method mappings",
+    content: contractPaymentMethodSources,
+    required: [
+      'calculatePaymentMethodHash("paypal")',
+      'calculatePaymentMethodHash("venmo")',
+      'calculatePaymentMethodHash("cashapp")',
+    ],
+  }),
+  check({
     producer: "zkp2p-indexer",
     ref: "origin/main",
-    surface: "tier aggregate schema",
+    surface: "chargebackable platform aggregate schema",
     content: mainIndexerSchema,
-    required: ["type TakerStats", "totalFulfilledVolume: BigInt!", "lockScore: BigInt!"],
+    required: [
+      "type TakerPlatformStats",
+      "chainId: Int!",
+      "taker: String!",
+      "paymentMethodHash: String!",
+      "totalAmountTaken: BigInt!",
+    ],
   }),
 ];
 
@@ -164,7 +191,7 @@ process.stdout.write(
       runtimeChecks,
       forwardChecks,
       membershipPrerequisiteChecks,
-      note: "Tier forward drift and every current-membership prerequisite must be resolved before the corresponding producer rollout.",
+      note: "Chargebackable platform aggregates and every current-membership prerequisite must remain compatible before rollout.",
     },
     null,
     2,

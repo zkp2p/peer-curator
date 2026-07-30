@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import { IndexerClient } from "../src/indexer.js";
+import {
+  CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+  CHARGEBACKABLE_PAYMENT_METHOD_HASHES,
+} from "../src/paymentMethods.js";
 
-const takerStatsResponse = {
+const taker = "0x1111111111111111111111111111111111111111";
+const paypalHash = CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal;
+const takerPlatformStatsResponse = {
   data: {
-    TakerStats: [
+    TakerPlatformStats: [
       {
-        id: "8453_0x1111111111111111111111111111111111111111",
-        owner: "0x1111111111111111111111111111111111111111",
-        totalFulfilledVolume: "500000000",
-        lockScore: "0",
+        id: `8453_${taker}_${paypalHash}`,
+        chainId: 8453,
+        taker,
+        paymentMethodHash: paypalHash,
+        totalAmountTaken: "500000000",
       },
     ],
   },
@@ -17,7 +24,7 @@ const takerStatsResponse = {
 
 function mockIndexer(): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(takerStatsResponse), {
+    new Response(JSON.stringify(takerPlatformStatsResponse), {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
@@ -35,7 +42,7 @@ describe("IndexerClient authentication", () => {
     const fetchMock = mockIndexer();
     const client = new IndexerClient("https://indexer.example/graphql", undefined, 8453, 1_000);
 
-    await client.getTakerStats();
+    await client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET);
 
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
     expect(headers["x-api-key"]).toBeUndefined();
@@ -50,10 +57,183 @@ describe("IndexerClient authentication", () => {
       1_000,
     );
 
-    await client.getTakerStats();
+    await client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET);
 
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
     expect(headers["x-api-key"]).toBe("test-api-key");
+  });
+});
+
+describe("IndexerClient taker-platform pagination and validation", () => {
+  function rawPlatformRow(input: {
+    taker: string;
+    paymentMethodHash?: string;
+    totalAmountTaken?: unknown;
+    id?: string;
+  }) {
+    const paymentMethodHash = input.paymentMethodHash ?? paypalHash;
+    return {
+      id: input.id ?? `8453_${input.taker}_${paymentMethodHash}`,
+      chainId: 8453,
+      taker: input.taker,
+      paymentMethodHash,
+      totalAmountTaken: input.totalAmountTaken ?? "1",
+    };
+  }
+
+  it("paginates deterministically and aggregates no rows in the client", async () => {
+    const firstPage = Array.from({ length: 1_000 }, (_, index) => {
+      const pageTaker = `0x${(index + 1).toString(16).padStart(40, "0")}`;
+      return rawPlatformRow({ taker: pageTaker });
+    });
+    const finalTaker = "0xffffffffffffffffffffffffffffffffffffffff";
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        variables: { after: string };
+      };
+      const page = body.variables.after ? [rawPlatformRow({ taker: finalTaker })] : firstPage;
+      return new Response(JSON.stringify({ data: { TakerPlatformStats: page } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const rows = await client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET);
+
+    expect(rows).toHaveLength(1_001);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondRequest = JSON.parse(
+      String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body),
+    );
+    expect(secondRequest.variables.after).toBe(firstPage.at(-1)?.id);
+  });
+
+  it("fails closed on duplicate row ids", async () => {
+    const row = rawPlatformRow({ taker });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { TakerPlatformStats: [row, row] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET),
+    ).rejects.toThrow("duplicate or non-ascending TakerPlatformStats");
+  });
+
+  it("fails closed when pagination does not advance", async () => {
+    const page = Array.from({ length: 1_000 }, (_, index) => {
+      const pageTaker = `0x${(index + 1).toString(16).padStart(40, "0")}`;
+      return rawPlatformRow({ taker: pageTaker });
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ data: { TakerPlatformStats: page } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET),
+    ).rejects.toThrow("duplicate or non-ascending");
+  });
+
+  it("rejects an unknown configured chargebackable hash before querying", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const unknownHashes = new Set<`0x${string}`>([`0x${"99".repeat(32)}` as `0x${string}`]);
+    await expect(client.getTakerPlatformStats(unknownHashes)).rejects.toThrow("invalid or unknown");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing rows", { data: {} }, "omitted TakerPlatformStats"],
+    [
+      "invalid address",
+      {
+        data: {
+          TakerPlatformStats: [rawPlatformRow({ taker: "not-an-address" })],
+        },
+      },
+      "Invalid TakerPlatformStats.taker",
+    ],
+    [
+      "unexpected hash",
+      {
+        data: {
+          TakerPlatformStats: [
+            rawPlatformRow({
+              taker,
+              paymentMethodHash: `0x${"99".repeat(32)}`,
+            }),
+          ],
+        },
+      },
+      "unexpected TakerPlatformStats",
+    ],
+    [
+      "invalid amount",
+      {
+        data: {
+          TakerPlatformStats: [rawPlatformRow({ taker, totalAmountTaken: "1.5" })],
+        },
+      },
+      "invalid TakerPlatformStats.totalAmountTaken",
+    ],
+  ])("fails closed on %s", async (_label, payload, message) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET),
+    ).rejects.toThrow(message);
   });
 });
 

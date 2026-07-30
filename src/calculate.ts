@@ -1,6 +1,7 @@
 import type { RuntimeSettings } from "./config.js";
 import { assertCascadingSets, type DesiredSnapshot, type PinnedMember, TIERS } from "./domain.js";
 import { IndexerClient } from "./indexer.js";
+import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 import { calculateHistoricalTakerPolicy } from "./policies.js";
 import { BLOCKED_WALLET_HASHES, isBlockedWallet } from "./staticWalletRules.js";
 
@@ -40,10 +41,12 @@ export async function calculateDesiredSnapshot(
       settings.requestTimeoutMs,
     );
 
-  const takerStats = await indexer.getTakerStats();
+  const takerPlatformStats = await indexer.getTakerPlatformStats(
+    CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+  );
 
   const historical = calculateHistoricalTakerPolicy({
-    takerStats,
+    takerPlatformStats,
     isBlockedWallet,
   });
   const desired: DesiredSnapshot = {

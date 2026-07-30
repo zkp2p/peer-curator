@@ -9,6 +9,7 @@ import {
   TIERS,
   tierForAddress,
 } from "../src/domain.js";
+import { CHARGEBACKABLE_PAYMENT_METHOD_HASHES } from "../src/paymentMethods.js";
 import {
   calculateHistoricalTakerPolicy,
   classifyTier,
@@ -78,55 +79,36 @@ describe("pinned members", () => {
 
 describe("classifyTier", () => {
   it("uses inclusive historical volume thresholds", () => {
-    expect(classifyTier(499_999_999n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PEASANT");
-    expect(classifyTier(500_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PEER");
-    expect(classifyTier(2_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PLUS");
-    expect(classifyTier(10_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("PRO");
-    expect(classifyTier(25_000_000_000n, 0n, 0n, HISTORICAL_TAKER_POLICY)).toBe("TOP");
-  });
-
-  it("demotes one level per crossed lock-score threshold", () => {
-    const volume = 25_000_000_000n;
-    expect(classifyTier(volume, volume * 50n, volume, HISTORICAL_TAKER_POLICY)).toBe("PRO");
-    expect(classifyTier(volume, volume * 200n, volume, HISTORICAL_TAKER_POLICY)).toBe("PLUS");
-    expect(classifyTier(volume, volume * 1_000n, volume, HISTORICAL_TAKER_POLICY)).toBe("PEASANT");
-  });
-
-  it("uses the 250 USDC dilution floor", () => {
-    expect(classifyTier(2_000_000_000n, 250_000_000n * 49n, 0n, HISTORICAL_TAKER_POLICY)).toBe(
-      "PLUS",
-    );
-    expect(classifyTier(2_000_000_000n, 250_000_000n * 50n, 0n, HISTORICAL_TAKER_POLICY)).toBe(
-      "PEER",
-    );
+    expect(classifyTier(499_999_999n, HISTORICAL_TAKER_POLICY)).toBe("PEASANT");
+    expect(classifyTier(500_000_000n, HISTORICAL_TAKER_POLICY)).toBe("PEER");
+    expect(classifyTier(2_000_000_000n, HISTORICAL_TAKER_POLICY)).toBe("PLUS");
+    expect(classifyTier(10_000_000_000n, HISTORICAL_TAKER_POLICY)).toBe("PRO");
+    expect(classifyTier(25_000_000_000n, HISTORICAL_TAKER_POLICY)).toBe("PRO");
   });
 });
 
 describe("historical taker policy", () => {
-  it("applies blocklist precedence and folds the natural top band into Pro", () => {
+  const platformRow = (
+    id: string,
+    taker: Address,
+    paymentMethodHash: `0x${string}`,
+    totalAmountTaken: bigint,
+  ) => ({ id, taker, paymentMethodHash, totalAmountTaken });
+
+  it("applies blocklist precedence", () => {
     const peer = address("1");
     const blocked = address("2");
     const pro = address("3");
     const snapshot = calculateHistoricalTakerPolicy({
-      takerStats: [
-        {
-          id: `8453_${peer}`,
-          owner: peer,
-          totalFulfilledVolume: 500_000_000n,
-          lockScore: 0n,
-        },
-        {
-          id: `8453_${blocked}`,
-          owner: blocked,
-          totalFulfilledVolume: 50_000_000_000n,
-          lockScore: 0n,
-        },
-        {
-          id: `8453_${pro}`,
-          owner: pro,
-          totalFulfilledVolume: 25_000_000_000n,
-          lockScore: 0n,
-        },
+      takerPlatformStats: [
+        platformRow("peer", peer, CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal, 500_000_000n),
+        platformRow(
+          "blocked",
+          blocked,
+          CHARGEBACKABLE_PAYMENT_METHOD_HASHES.venmo,
+          50_000_000_000n,
+        ),
+        platformRow("pro", pro, CHARGEBACKABLE_PAYMENT_METHOD_HASHES.cashapp, 25_000_000_000n),
       ],
       isBlockedWallet: (candidate) => candidate === blocked,
     });
@@ -139,36 +121,72 @@ describe("historical taker policy", () => {
     );
   });
 
-  it("keeps a lock-score demoted wallet cascading at its reduced tier", () => {
-    const demoted = address("9");
-    const volume = 25_000_000_000n;
+  it("sums multiple qualifying platform rows once per wallet and preserves cascading membership", () => {
+    const multiPlatform = address("9");
     const snapshot = calculateHistoricalTakerPolicy({
-      takerStats: [
-        {
-          id: `8453_${demoted}`,
-          owner: demoted,
-          totalFulfilledVolume: volume,
-          lockScore: volume * 200n,
-        },
+      takerPlatformStats: [
+        platformRow(
+          "paypal",
+          multiPlatform,
+          CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal,
+          1_000_000_000n,
+        ),
+        platformRow(
+          "venmo",
+          multiPlatform,
+          CHARGEBACKABLE_PAYMENT_METHOD_HASHES.venmo,
+          1_000_000_000n,
+        ),
       ],
       isBlockedWallet: () => false,
     });
 
-    expect(snapshot.membersByTier.PLUS).toEqual(new Set([demoted]));
-    expect(snapshot.membersByTier.PEER).toEqual(new Set([demoted]));
+    expect(snapshot.membersByTier.PLUS).toEqual(new Set([multiPlatform]));
+    expect(snapshot.membersByTier.PEER).toEqual(new Set([multiPlatform]));
     expect(snapshot.membersByTier.PRO.size).toBe(0);
+  });
+
+  it("makes non-chargebackable platform rows contribute zero", () => {
+    const mixed = address("7");
+    const nonChargebackHash = `0x${"77".repeat(32)}` as const;
+    const snapshot = calculateHistoricalTakerPolicy({
+      takerPlatformStats: [
+        platformRow("paypal", mixed, CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal, 499_999_999n),
+        platformRow("other", mixed, nonChargebackHash, 50_000_000_000n),
+      ],
+      isBlockedWallet: () => false,
+    });
+
+    for (const tier of TIERS) expect(snapshot.membersByTier[tier].size).toBe(0);
+  });
+
+  it("fails closed on duplicate platform rows", () => {
+    const duplicate = address("6");
+    const row = platformRow(
+      "duplicate",
+      duplicate,
+      CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal,
+      500_000_000n,
+    );
+
+    expect(() =>
+      calculateHistoricalTakerPolicy({
+        takerPlatformStats: [row, row],
+        isBlockedWallet: () => false,
+      }),
+    ).toThrow("duplicate or invalid platform rows");
   });
 
   it("excludes a blocked wallet from every curated tier", () => {
     const blocked = address("a");
     const snapshot = calculateHistoricalTakerPolicy({
-      takerStats: [
-        {
-          id: `8453_${blocked}`,
-          owner: blocked,
-          totalFulfilledVolume: 50_000_000_000n,
-          lockScore: 0n,
-        },
+      takerPlatformStats: [
+        platformRow(
+          "blocked",
+          blocked,
+          CHARGEBACKABLE_PAYMENT_METHOD_HASHES.paypal,
+          50_000_000_000n,
+        ),
       ],
       isBlockedWallet: (candidate) => candidate === blocked,
     });

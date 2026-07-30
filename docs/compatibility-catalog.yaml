@@ -1,6 +1,6 @@
-version: 1
+version: 2
 repositories:
-  - {path: protocol, class: coordination, automation: monitor}
-  - {path: zkp2p-v2-contracts, class: owner, automation: guarded}
-  - {path: zkp2p-indexer, class: owner, automation: guarded}
-  - {path: curator, class: provenance, automation: monitor}
+  - {path: workspace-control, class: coordination, automation: monitor}
+  - {path: projects/core/zkp2p-v2-contracts, class: owner, automation: guarded}
+  - {path: projects/core/zkp2p-indexer, class: owner, automation: guarded}
+  - {path: projects/core/curator, class: provenance, automation: monitor}

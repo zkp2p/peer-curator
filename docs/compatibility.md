@@ -1,11 +1,12 @@
 # Producer compatibility
 
-Baseline reviewed on 2026-07-24.
+Baseline reviewed on 2026-07-30.
 
 | Producer | Surface | Requirement |
 |---|---|---|
-| Contracts `origin/main` (`ce038e6c`) | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
-| Indexer tier aggregates | `TakerStats` | lifetime fulfilled volume and lock score used by the historical-taker policy |
+| Contracts `origin/main` | payment-method lookups | canonical PayPal, Venmo, and Cash App name/hash mappings consumed from `@zkp2p/contracts-v2@0.3.0` |
+| Contracts `origin/main` | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
+| Indexer qualification aggregates | `TakerPlatformStats` | `chainId`, `taker`, `paymentMethodHash`, and `totalAmountTaken` for paginated chargebackable-platform volume |
 | Indexer current membership | `AddressGroup`, `AddressGroupMember` | all three groups enumerable, with `memberCount` equal to the matching member rows |
 | Indexer synchronization | `chain_metadata` | one valid processed-block watermark for chain 8453 |
 | Indexer environment config | `AddressGroupRegistry` source | a nonzero registry address bound in the matching environment |
@@ -40,5 +41,5 @@ the next scheduled run retries from a new stable state.
 RPC remains the source for pinned contract governance, simulation, writes, and
 receipts. It is not used to enumerate members or scan logs.
 
-Do not silently drop lock-score penalties, accept decimal group IDs, or refresh
-blocked-wallet hashes without reviewed provenance.
+Do not add another qualifying platform, accept decimal group IDs, or refresh
+blocked-wallet hashes without reviewed policy and provenance.
