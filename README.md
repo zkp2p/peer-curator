@@ -104,6 +104,8 @@ Removing a pin returns that wallet to the calculated policy on the next sync.
 - Every event query includes an explicit event-id upper bound for the chosen
   block, every returned id is parsed and revalidated, pagination must advance,
   and hard row caps stop unexpectedly large histories.
+- A final watermark read must still cover the chosen block; advancement is
+  allowed, but rollback/reindex below the snapshot fails closed.
 - RPC bytecode and `getGroup` governance reads use that exact block.
 - The Base event-id ordering window is deliberately fail-closed at blocks
   10,000,000–99,999,999; the query strategy must be reviewed before Base

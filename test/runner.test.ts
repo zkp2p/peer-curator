@@ -28,6 +28,17 @@ describe("assertPinnedIndexerSnapshot", () => {
     ).toThrow("not sufficiently confirmed");
   });
 
+  it("rejects a final watermark below the chosen snapshot", () => {
+    expect(() =>
+      assertPinnedIndexerSnapshot({
+        snapshotBlock: 180n,
+        indexedThroughBlock: 179n,
+        rpcLatestBlock: 200n,
+        confirmationBlocks: 20n,
+      }),
+    ).toThrow("ahead of the indexer watermark");
+  });
+
   it("chooses the lower of the indexer watermark and confirmed RPC head", () => {
     expect(
       choosePinnedSnapshotBlock({

@@ -31,6 +31,7 @@ For `plan` and `sync`, the reconciler:
   streams and group membership from creation/add/remove streams;
 - fails on duplicate or malformed events, missing correlations, impossible
   membership transitions, non-advancing pagination, or hard row caps;
+- rereads the watermark and fails if it fell below the chosen block;
 - reads bytecode and `getGroup` at that exact block.
 
 This accepts an indexer behind the RPC head and remains consistent while its

@@ -105,6 +105,16 @@ export async function run(
           v2Environment: settings.v2HistoryEnvironment,
         })
       : undefined;
+  if (pinnedSnapshot) {
+    const finalIndexedThroughBlock = await indexer.getIndexedThroughBlock();
+    if (
+      indexedThroughBlock === undefined ||
+      finalIndexedThroughBlock < pinnedSnapshot.membership.snapshotBlock
+    ) {
+      throw new Error("Indexer watermark fell below the chosen snapshot block");
+    }
+    indexedThroughBlock = finalIndexedThroughBlock;
+  }
   const desired = pinnedSnapshot
     ? calculateDesiredSnapshotFromRows(settings, pinnedSnapshot.takerPlatformStats)
     : await calculateDesiredSnapshot(settings, indexer);
