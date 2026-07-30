@@ -63,6 +63,11 @@ const BASE_EVENT_ID_MAX_BLOCK = 99_999_999n;
  */
 export type V2HistoryEnvironment = "staging" | "prod";
 
+export const V2_HISTORY_REGISTRY_BY_ENVIRONMENT = Object.freeze({
+  staging: "0x54ff7788cb42b46fe2f016a65fd0f654bb9bcf3d",
+  prod: "0x39f80118f9eb619135f116171b6cb91d372c5af2",
+} satisfies Record<V2HistoryEnvironment, Address>);
+
 export const V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES = Object.freeze([
   ["0xce6454f272127ba69e8c8128b92f2388ca343257", "venmo", "staging"],
   ["0xddb9d452180398f456fe89a43df9c65b19756cea", "cashapp", "staging"],
@@ -200,7 +205,12 @@ export function reconstructPlatformRows(input: {
 
   const signals = new Map<
     Hex,
-    { taker: Address; paymentMethodHash: Hex; version: "v2" | "unified" }
+    {
+      taker: Address;
+      paymentMethodHash: Hex;
+      version: "v2" | "unified";
+      eventId: string;
+    }
   >();
 
   for (const row of v2Signals) {
@@ -217,6 +227,7 @@ export function reconstructPlatformRows(input: {
       taker: normalizeAddress(row.owner, "V2 IntentSignaled.owner"),
       paymentMethodHash: CHARGEBACKABLE_PAYMENT_METHOD_HASHES[methodName],
       version: "v2",
+      eventId: row.id,
     });
   }
 
@@ -233,6 +244,7 @@ export function reconstructPlatformRows(input: {
       taker: normalizeAddress(row.owner, "unified IntentSignaled.owner"),
       paymentMethodHash,
       version: "unified",
+      eventId: row.id,
     });
   }
 
@@ -243,6 +255,7 @@ export function reconstructPlatformRows(input: {
   const fulfilledIntentHashes = new Set<Hex>();
 
   const recordFulfillment = (inputRow: {
+    id: string;
     intentHash: unknown;
     owner?: unknown;
     amount: unknown;
@@ -253,6 +266,9 @@ export function reconstructPlatformRows(input: {
     if (!signal) return;
     if (signal.version !== inputRow.version) {
       throw new Error("Indexer returned a cross-version intent collision");
+    }
+    if (compareEventIds({ id: signal.eventId }, { id: inputRow.id }, chainId, snapshotBlock) >= 0) {
+      throw new Error("Indexer returned a fulfillment at or before its intent signal");
     }
     if (fulfilledIntentHashes.has(intentHash)) {
       throw new Error("Indexer returned duplicate chargebackable fulfillment");

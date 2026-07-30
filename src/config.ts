@@ -2,7 +2,10 @@ import "dotenv/config";
 
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import type { V2HistoryEnvironment } from "./blockPinnedSnapshot.js";
+import {
+  V2_HISTORY_REGISTRY_BY_ENVIRONMENT,
+  type V2HistoryEnvironment,
+} from "./blockPinnedSnapshot.js";
 import {
   type GroupsConfig,
   groupKey,
@@ -230,6 +233,14 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
       : undefined;
   if (groups && groups.chainId !== env.CHAIN_ID) {
     throw new Error("CHAIN_ID does not match the group configuration");
+  }
+  if (
+    groups &&
+    groups.registryAddress !== V2_HISTORY_REGISTRY_BY_ENVIRONMENT[env.V2_HISTORY_ENVIRONMENT]
+  ) {
+    throw new Error(
+      "V2_HISTORY_ENVIRONMENT does not match the configured AddressGroupRegistry deployment",
+    );
   }
   const rpcRequired = command === "plan" || command === "sync";
   if (rpcRequired && !env.RPC_URL) {

@@ -115,6 +115,27 @@ describe("block-pinned event reconstruction", () => {
     ).toThrow("duplicate chargebackable fulfillment");
   });
 
+  it("fails closed when a fulfillment does not follow its signal", () => {
+    expect(() =>
+      reconstructPlatformRows({
+        chainId,
+        snapshotBlock,
+        v2Environment: "prod",
+        v2Signals: [],
+        v2Fulfillments: [],
+        unifiedSignals: [
+          {
+            id: eventId(2),
+            intentHash: intent("1"),
+            paymentMethod: CHARGEBACKABLE_PAYMENT_METHOD_HASHES.cashapp,
+            owner: taker,
+          },
+        ],
+        unifiedFulfillments: [{ id: eventId(1), intentHash: intent("1"), amount: "100000000" }],
+      }),
+    ).toThrow("fulfillment at or before its intent signal");
+  });
+
   it("replays adds and removals in block/log order", () => {
     const first = "0x3333333333333333333333333333333333333333";
     const second = "0x4444444444444444444444444444444444444444";

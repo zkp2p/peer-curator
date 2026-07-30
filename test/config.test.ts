@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { V2_HISTORY_REGISTRY_BY_ENVIRONMENT } from "../src/blockPinnedSnapshot.js";
 import { loadSettings, parseGroupsConfig, parsePinnedMembers } from "../src/config.js";
 import { POLICY_SCOPES, TIERS } from "../src/domain.js";
 
-function groupsFixture(): unknown {
+function groupsFixture(registryAddress: string = `0x${"f".repeat(40)}`): unknown {
   return {
     chainId: 8453,
-    registryAddress: `0x${"f".repeat(40)}`,
+    registryAddress,
     registryDeploymentBlock: "1",
     groups: POLICY_SCOPES.flatMap((scope, scopeIndex) =>
       TIERS.map((tier, tierIndex) => ({
@@ -40,6 +41,17 @@ describe("loadSettings", () => {
     vi.stubEnv("V2_HISTORY_ENVIRONMENT", "prod");
     await expect(loadSettings("calculate")).rejects.toThrow(
       "does not match the Railway environment",
+    );
+  });
+
+  it("rejects a V2 history selector that mismatches the configured registry", async () => {
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", "staging");
+    vi.stubEnv(
+      "GROUPS_CONFIG_JSON",
+      JSON.stringify(groupsFixture(V2_HISTORY_REGISTRY_BY_ENVIRONMENT.prod)),
+    );
+    await expect(loadSettings("plan")).rejects.toThrow(
+      "does not match the configured AddressGroupRegistry deployment",
     );
   });
 });

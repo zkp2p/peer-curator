@@ -1,7 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES } from "../src/blockPinnedSnapshot.js";
+import {
+  V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES,
+  V2_HISTORY_REGISTRY_BY_ENVIRONMENT,
+  type V2HistoryEnvironment,
+} from "../src/blockPinnedSnapshot.js";
 
 interface SurfaceCheck {
   producer: string;
@@ -64,21 +68,24 @@ function checkAddressGroupBinding(input: {
   ref: string;
   surface: string;
   content: string;
+  environment: V2HistoryEnvironment;
 }): SurfaceCheck {
   const bindings = [
     ...input.content.matchAll(
-      /- name: AddressGroupRegistry\s*\n\s+address:\s*["']0x(?!0{40})[0-9a-fA-F]{40}["']/gm,
+      /- name: AddressGroupRegistry\s*\n\s+address:\s*["'](0x(?!0{40})[0-9a-fA-F]{40})["']/gm,
     ),
   ];
-  const hasExactlyOneNonzeroAddress = bindings.length === 1;
+  const expectedAddress = V2_HISTORY_REGISTRY_BY_ENVIRONMENT[input.environment];
+  const hasExactBinding =
+    bindings.length === 1 && bindings[0]?.[1]?.toLowerCase() === expectedAddress;
   return {
     producer: "zkp2p-indexer",
     ref: input.ref,
     surface: input.surface,
-    status: hasExactlyOneNonzeroAddress ? "compatible" : "incompatible",
-    missing: hasExactlyOneNonzeroAddress
+    status: hasExactBinding ? "compatible" : "incompatible",
+    missing: hasExactBinding
       ? []
-      : ["exactly one nonzero AddressGroupRegistry address binding"],
+      : [`exact ${input.environment} AddressGroupRegistry address binding`],
   };
 }
 
@@ -279,11 +286,13 @@ const membershipPrerequisiteChecks = [
     ref: "origin/main",
     surface: "staging AddressGroupRegistry source binding",
     content: mainIndexerStagingConfig,
+    environment: "staging",
   }),
   checkAddressGroupBinding({
     ref: "origin/main",
     surface: "production AddressGroupRegistry source binding",
     content: mainIndexerProductionConfig,
+    environment: "prod",
   }),
 ];
 

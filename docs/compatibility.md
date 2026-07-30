@@ -7,7 +7,7 @@ Baseline reviewed on 2026-07-30.
 | Contracts `origin/main` | payment-method lookups | canonical PayPal, Venmo, and Cash App name/hash mappings consumed from `@zkp2p/contracts-v2@0.3.0` |
 | Contracts `origin/main` | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
 | Indexer qualification events | `Escrow_V2_IntentSignaled/Fulfilled`, `Orchestrator_V21_IntentSignaled/Fulfilled` | immutable event IDs encode chain/block/log; signal rows provide taker/platform and fulfillment rows provide filled amount |
-| Indexer legacy mapping | `src/utils/paymentMethods.ts` | reviewed environment-specific V2 verifier-to-method mapping selected by `V2_HISTORY_ENVIRONMENT`; canonical method hashes remain consumed from contracts |
+| Indexer legacy mapping | `src/utils/paymentMethods.ts` | reviewed environment-specific V2 verifier-to-method mapping selected by `V2_HISTORY_ENVIRONMENT` and fail-closed against the exact staging/production AddressGroupRegistry; canonical method hashes remain consumed from contracts |
 | Indexer membership events | `AddressGroupRegistry_GroupCreated/MemberAdded/MemberRemoved` | immutable event IDs encode chain/block/log and allow deterministic membership replay |
 | Indexer current projections | `TakerPlatformStats`, `AddressGroup`, `AddressGroupMember` | calculation parity and post-run member-count/enumeration verification |
 | Indexer synchronization | `chain_metadata` | one valid processed-block watermark from which an explicit confirmed block can be selected |

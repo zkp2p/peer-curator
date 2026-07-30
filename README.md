@@ -219,7 +219,8 @@ Runtime credentials:
 
 - `INDEXER_API_KEY` — optional; public indexer access is rate-limited.
 - `V2_HISTORY_ENVIRONMENT` — required historical V2 mapping selector:
-  `staging` or `prod`. It must match the indexer deployment.
+  `staging` or `prod`. It must match both the indexer and the exact
+  AddressGroupRegistry deployment in the group manifest.
 - `RPC_URL` — required for `plan` and `sync`.
 - `GROUP_ADMIN_PRIVATE_KEY` — required only for execution.
 
