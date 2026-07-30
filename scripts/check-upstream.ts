@@ -86,6 +86,11 @@ const contractPaymentMethodSources = ["paypal", "venmo", "cashapp"]
   .map((name) => show(contractsRepo, "origin/main", `deployments/verifiers/${name}.ts`))
   .join("\n");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
+const mainTakerPlatformStatsProducer = [
+  show(indexerRepo, "origin/main", "src/services/takerPlatformStats.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v2/taker_stats.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v21/taker_stats.ts"),
+].join("\n");
 const mainIndexerProductionConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
 const mainIndexerStagingConfig = show(indexerRepo, "origin/main", "config.base_staging.yaml");
 const mainAddressGroupHandler = show(
@@ -131,6 +136,21 @@ const runtimeChecks = [
       "taker: String!",
       "paymentMethodHash: String!",
       "totalAmountTaken: BigInt!",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "chargebackable platform aggregate producer",
+    content: mainTakerPlatformStatsProducer,
+    required: [
+      "buildTakerPlatformStatsId",
+      "taker.toLowerCase()",
+      "paymentMethodHash.toLowerCase()",
+      "totalAmountTaken: stats.totalAmountTaken + args.amount",
+      "args.context.TakerPlatformStats.set(updated)",
+      "recordTakerPlatformFill({",
+      "paymentMethodHash: intentBefore.paymentMethodHash",
     ],
   }),
 ];

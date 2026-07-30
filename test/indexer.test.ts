@@ -138,6 +138,41 @@ describe("IndexerClient taker-platform pagination and validation", () => {
     ).rejects.toThrow("duplicate or non-ascending TakerPlatformStats");
   });
 
+  it("fails closed on duplicate tuples whose ids differ only by casing", async () => {
+    const lowercaseTaker = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const uppercaseTaker = lowercaseTaker.toUpperCase().replace("0X", "0x");
+    const uppercaseHash = paypalHash.toUpperCase().replace("0X", "0x");
+    const rows = [
+      rawPlatformRow({
+        taker: uppercaseTaker,
+        paymentMethodHash: uppercaseHash,
+      }),
+      rawPlatformRow({
+        taker: lowercaseTaker,
+        paymentMethodHash: paypalHash,
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { TakerPlatformStats: rows } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getTakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET),
+    ).rejects.toThrow("duplicate canonical TakerPlatformStats");
+  });
+
   it("fails closed when pagination does not advance", async () => {
     const page = Array.from({ length: 1_000 }, (_, index) => {
       const pageTaker = `0x${(index + 1).toString(16).padStart(40, "0")}`;

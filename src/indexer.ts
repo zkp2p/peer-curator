@@ -429,7 +429,7 @@ export class IndexerClient {
       throw new Error("Indexer returned duplicate TakerPlatformStats rows");
     }
 
-    return rawRows.map((row) => {
+    const rows = rawRows.map((row) => {
       const taker = normalizeAddress(row.taker, "TakerPlatformStats.taker");
       const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
       if (
@@ -439,7 +439,8 @@ export class IndexerClient {
       ) {
         throw new Error("Indexer returned an unexpected TakerPlatformStats row");
       }
-      if (row.id.toLowerCase() !== `${this.chainId}_${taker}_${paymentMethodHash}`) {
+      const canonicalId = `${this.chainId}_${taker}_${paymentMethodHash}`;
+      if (row.id.toLowerCase() !== canonicalId) {
         throw new Error("Indexer returned an invalid TakerPlatformStats id");
       }
       if (typeof row.totalAmountTaken !== "string" || !/^\d+$/.test(row.totalAmountTaken)) {
@@ -450,11 +451,15 @@ export class IndexerClient {
         throw new Error("Indexer returned negative TakerPlatformStats.totalAmountTaken");
       }
       return {
-        id: row.id,
+        id: canonicalId,
         taker,
         paymentMethodHash,
         totalAmountTaken,
       };
     });
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("Indexer returned duplicate canonical TakerPlatformStats rows");
+    }
+    return rows;
   }
 }
