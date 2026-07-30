@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TIERS } from "../src/domain.js";
 import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "../src/phases.js";
 import { buildReconciliationPlan } from "../src/reconcile.js";
-import { assertPinnedIndexerSnapshot } from "../src/runner.js";
+import { assertPinnedIndexerSnapshot, choosePinnedSnapshotBlock } from "../src/runner.js";
 import { addr, applyMutations, groupId, planFixture } from "./fixtures.js";
 
 describe("assertPinnedIndexerSnapshot", () => {
@@ -10,6 +10,7 @@ describe("assertPinnedIndexerSnapshot", () => {
     expect(() =>
       assertPinnedIndexerSnapshot({
         snapshotBlock: 150n,
+        indexedThroughBlock: 160n,
         rpcLatestBlock: 200n,
         confirmationBlocks: 20n,
       }),
@@ -20,10 +21,28 @@ describe("assertPinnedIndexerSnapshot", () => {
     expect(() =>
       assertPinnedIndexerSnapshot({
         snapshotBlock: 190n,
+        indexedThroughBlock: 200n,
         rpcLatestBlock: 200n,
         confirmationBlocks: 20n,
       }),
     ).toThrow("not sufficiently confirmed");
+  });
+
+  it("chooses the lower of the indexer watermark and confirmed RPC head", () => {
+    expect(
+      choosePinnedSnapshotBlock({
+        indexedThroughBlock: 195n,
+        rpcLatestBlock: 200n,
+        confirmationBlocks: 20n,
+      }),
+    ).toBe(180n);
+    expect(
+      choosePinnedSnapshotBlock({
+        indexedThroughBlock: 175n,
+        rpcLatestBlock: 200n,
+        confirmationBlocks: 20n,
+      }),
+    ).toBe(175n);
   });
 });
 

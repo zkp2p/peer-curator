@@ -20,15 +20,33 @@ import { isBlockedWallet } from "./staticWalletRules.js";
 
 export function assertPinnedIndexerSnapshot(input: {
   snapshotBlock: bigint;
+  indexedThroughBlock: bigint;
   rpcLatestBlock: bigint;
   confirmationBlocks: bigint;
 }): void {
+  if (input.snapshotBlock > input.indexedThroughBlock) {
+    throw new Error("Chosen snapshot block is ahead of the indexer watermark");
+  }
   if (
     input.rpcLatestBlock < input.confirmationBlocks ||
     input.snapshotBlock > input.rpcLatestBlock - input.confirmationBlocks
   ) {
     throw new Error("Indexer snapshot is not sufficiently confirmed by RPC");
   }
+}
+
+export function choosePinnedSnapshotBlock(input: {
+  indexedThroughBlock: bigint;
+  rpcLatestBlock: bigint;
+  confirmationBlocks: bigint;
+}): bigint {
+  if (input.rpcLatestBlock < input.confirmationBlocks) {
+    throw new Error("RPC head is below the required confirmation depth");
+  }
+  const confirmedRpcBlock = input.rpcLatestBlock - input.confirmationBlocks;
+  return input.indexedThroughBlock < confirmedRpcBlock
+    ? input.indexedThroughBlock
+    : confirmedRpcBlock;
 }
 
 export async function run(
@@ -46,17 +64,49 @@ export async function run(
   if (reconciliationRun && !settings.groups) {
     throw new Error("Group configuration is required");
   }
-  const atomicSnapshot =
-    reconciliationRun && settings.groups
-      ? await indexer.getAtomicReconciliationSnapshot({
+
+  const publicClient =
+    reconciliationRun && settings.rpcUrl
+      ? createPublicClient({
+          chain: base,
+          transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
+        })
+      : undefined;
+  let rpcLatestBlock: bigint | undefined;
+  let indexedThroughBlock: bigint | undefined;
+  if (reconciliationRun) {
+    if (!publicClient) throw new Error("RPC_URL is required");
+    const rpcChainId = await publicClient.getChainId();
+    if (rpcChainId !== settings.chainId) {
+      throw new Error("RPC chain does not match CHAIN_ID");
+    }
+    [rpcLatestBlock, indexedThroughBlock] = await Promise.all([
+      publicClient.getBlockNumber(),
+      indexer.getIndexedThroughBlock(),
+    ]);
+  }
+  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
+  const snapshotBlock =
+    rpcLatestBlock !== undefined && indexedThroughBlock !== undefined
+      ? choosePinnedSnapshotBlock({
+          indexedThroughBlock,
+          rpcLatestBlock,
+          confirmationBlocks,
+        })
+      : undefined;
+  const pinnedSnapshot =
+    reconciliationRun && settings.groups && snapshotBlock !== undefined
+      ? await indexer.getBlockPinnedReconciliationSnapshot({
           registryAddress: settings.groups.registryAddress,
           groupIds: settings.groups.groups.map((group) => group.groupId),
           deploymentBlock: settings.groups.registryDeploymentBlock,
           paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+          snapshotBlock,
+          v2Environment: settings.v2HistoryEnvironment,
         })
       : undefined;
-  const desired = atomicSnapshot
-    ? calculateDesiredSnapshotFromRows(settings, atomicSnapshot.takerPlatformStats)
+  const desired = pinnedSnapshot
+    ? calculateDesiredSnapshotFromRows(settings, pinnedSnapshot.takerPlatformStats)
     : await calculateDesiredSnapshot(settings, indexer);
 
   logger.info(
@@ -94,22 +144,18 @@ export async function run(
   const groups = settings.groups;
   assertDesiredSnapshotComplete(desired, groups);
   assertDesiredSnapshotBounds(desired, groups);
-  if (!settings.rpcUrl) throw new Error("RPC_URL is required");
-
-  const publicClient = createPublicClient({
-    chain: base,
-    transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
-  });
-  const rpcChainId = await publicClient.getChainId();
-  if (rpcChainId !== settings.chainId) {
-    throw new Error("RPC chain does not match CHAIN_ID");
+  if (
+    !publicClient ||
+    !pinnedSnapshot ||
+    rpcLatestBlock === undefined ||
+    indexedThroughBlock === undefined
+  ) {
+    throw new Error("Block-pinned reconciliation inputs are unavailable");
   }
-  if (!atomicSnapshot) throw new Error("Atomic indexer snapshot is unavailable");
-  const confirmationBlocks = BigInt(settings.snapshotConfirmations);
-  const membership = atomicSnapshot.membership;
-  const rpcLatestBlock = await publicClient.getBlockNumber();
+  const membership = pinnedSnapshot.membership;
   assertPinnedIndexerSnapshot({
     snapshotBlock: membership.snapshotBlock,
+    indexedThroughBlock,
     rpcLatestBlock,
     confirmationBlocks,
   });
@@ -153,7 +199,7 @@ export async function run(
     {
       rpcLatestBlock: rpcLatestBlock.toString(),
       snapshotBlock: onchain.snapshotBlock.toString(),
-      indexedThroughBlock: onchain.indexedThroughBlock.toString(),
+      indexedThroughBlock: indexedThroughBlock.toString(),
       phase,
       cascadeViolations,
       totalAdds: plan.totalAdds,

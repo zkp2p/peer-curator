@@ -1,4 +1,17 @@
 import type { Address, Hex } from "viem";
+import {
+  buildPinnedEventIdBounds,
+  getV2ChargebackVerifierMap,
+  type RawGroupCreatedEvent,
+  type RawMemberEvent,
+  type RawUnifiedIntentFulfilled,
+  type RawUnifiedIntentSignaled,
+  type RawV2IntentFulfilled,
+  type RawV2IntentSignaled,
+  reconstructMembership,
+  reconstructPlatformRows,
+  type V2HistoryEnvironment,
+} from "./blockPinnedSnapshot.js";
 import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 
@@ -15,7 +28,7 @@ export interface IndexedMembershipSnapshot {
   indexedThroughBlock: bigint;
 }
 
-export interface AtomicReconciliationSnapshot {
+export interface BlockPinnedReconciliationSnapshot {
   takerPlatformStats: TakerPlatformStatsRow[];
   membership: IndexedMembershipSnapshot;
 }
@@ -60,10 +73,11 @@ interface RawChainMetadata {
 }
 
 const PAGE_SIZE = 1_000;
-const ATOMIC_PLATFORM_PAGE_COUNT = 11;
-const ATOMIC_MEMBER_PAGE_COUNT = 6;
-const MAX_ATOMIC_PLATFORM_ROWS = (ATOMIC_PLATFORM_PAGE_COUNT - 1) * PAGE_SIZE;
-const MAX_ATOMIC_MEMBER_ROWS = (ATOMIC_MEMBER_PAGE_COUNT - 1) * PAGE_SIZE;
+const MAX_V2_SIGNAL_ROWS = 25_000;
+const MAX_V2_FULFILLMENT_ROWS = 25_000;
+const MAX_UNIFIED_SIGNAL_ROWS = 100_000;
+const MAX_UNIFIED_FULFILLMENT_ROWS = 100_000;
+const MAX_GROUP_EVENT_ROWS = 10_000;
 const MAX_RETRIES = 5;
 const PUBLIC_REQUEST_INTERVAL_MS = 650;
 
@@ -446,189 +460,196 @@ export class IndexerClient {
     return rows;
   }
 
+  private async getPinnedEventRows<T extends { id: string }>(input: {
+    root: string;
+    selection: string;
+    snapshotBlock: bigint;
+    maximumRows: number;
+    additionalWhere?: string;
+    variables?: Record<string, unknown>;
+    variableDefinitions?: string;
+  }): Promise<T[]> {
+    const bounds = buildPinnedEventIdBounds(this.chainId, input.snapshotBlock);
+    const query = `
+      query PinnedEventPage(
+        $after: String!
+        $through: String!
+        $limit: Int!
+        ${input.variableDefinitions ?? ""}
+      ) {
+        rows: ${input.root}(
+          where: {
+            id: { _gt: $after, _lte: $through }
+            ${input.additionalWhere ?? ""}
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          ${input.selection}
+        }
+      }
+    `;
+    const rows: T[] = [];
+    let after = bounds.after;
+    for (;;) {
+      const data = await this.query<{ rows: T[] }>(query, {
+        after,
+        through: bounds.through,
+        limit: PAGE_SIZE,
+        ...input.variables,
+      });
+      const page = data.rows;
+      if (!Array.isArray(page)) {
+        throw new Error(`Indexer response omitted ${input.root}`);
+      }
+      let previousId = after;
+      for (const row of page) {
+        if (typeof row.id !== "string" || row.id <= previousId) {
+          throw new Error(`Indexer returned non-ascending ${input.root} event ids`);
+        }
+        previousId = row.id;
+      }
+      rows.push(...page);
+      if (rows.length > input.maximumRows) {
+        throw new Error(`${input.root} exceeds its block-snapshot safety limit`);
+      }
+      if (page.length < PAGE_SIZE) break;
+      const next = page.at(-1)?.id;
+      if (!next || next <= after) {
+        throw new Error(`Indexer pagination did not advance for ${input.root}`);
+      }
+      after = next;
+    }
+    return rows;
+  }
+
   /**
-   * Keep every mutable reconciliation root in this one query() call. Hasura
-   * compiles the GraphQL document to one SQL statement, so the co-read
-   * watermark, desired-volume rows, groups, and members share one database
-   * snapshot. Fixed aliases avoid follow-up requests while explicit overflow
-   * pages make the bounded result fail closed.
+   * Reconstructs policy volume and group membership only from immutable event
+   * rows whose event ids are bounded by one explicit finalized Base block.
+   * Multiple GraphQL requests are safe because later indexing cannot mutate
+   * rows at or below the chosen block.
    */
-  public async getAtomicReconciliationSnapshot(input: {
+  public async getBlockPinnedReconciliationSnapshot(input: {
     registryAddress: Address;
     groupIds: GroupId[];
     deploymentBlock: bigint;
     paymentMethodHashes: ReadonlySet<Hex>;
-  }): Promise<AtomicReconciliationSnapshot> {
+    snapshotBlock: bigint;
+    v2Environment: V2HistoryEnvironment;
+  }): Promise<BlockPinnedReconciliationSnapshot> {
     const configuredHashes = this.validatePaymentMethodHashes(input.paymentMethodHashes);
     const uniqueGroupIds = [...new Set(input.groupIds)];
-    if (uniqueGroupIds.length === 0) {
-      throw new Error("At least one address group is required");
+    if (uniqueGroupIds.length === 0 || uniqueGroupIds.length !== input.groupIds.length) {
+      throw new Error("Address group ids must be non-empty and unique");
+    }
+    if (input.deploymentBlock > input.snapshotBlock) {
+      throw new Error("Registry deployment block is greater than the requested snapshot");
     }
 
-    const platformPages = Array.from(
-      { length: ATOMIC_PLATFORM_PAGE_COUNT },
-      (_, index) => `
-        platformPage${index}: TakerPlatformStats(
-          where: {
-            chainId: { _eq: $chainId }
-            paymentMethodHash: { _in: $paymentMethodHashes }
-          }
-          order_by: { id: asc }
-          limit: $pageSize
-          offset: ${index * PAGE_SIZE}
-        ) {
-          id
-          chainId
-          taker
-          paymentMethodHash
-          totalAmountTaken
-        }
-      `,
-    ).join("\n");
-    const memberPages = Array.from(
-      { length: ATOMIC_MEMBER_PAGE_COUNT },
-      (_, index) => `
-        memberPage${index}: AddressGroupMember(
-          where: {
-            chainId: { _eq: $chainId }
-            registryAddress: { _ilike: $registryAddress }
-            groupId: { _in: $groupIds }
-          }
-          order_by: { id: asc }
-          limit: $pageSize
-          offset: ${index * PAGE_SIZE}
-        ) {
-          id
-          chainId
-          registryAddress
-          groupId
-          groupEntityId
-          member
-        }
-      `,
-    ).join("\n");
-    const query = `
-      query AtomicReconciliationSnapshot(
-        $chainId: Int!
-        $paymentMethodHashes: [String!]!
-        $registryAddress: String!
-        $groupIds: [String!]!
-        $pageSize: Int!
-        $groupLimit: Int!
-      ) {
-        chain_metadata(
-          where: { chain_id: { _eq: $chainId } }
-          limit: 2
-        ) {
-          chain_id
-          latest_processed_block
-        }
-        ${platformPages}
-        AddressGroup(
-          where: {
-            chainId: { _eq: $chainId }
-            registryAddress: { _ilike: $registryAddress }
-            groupId: { _in: $groupIds }
-          }
-          order_by: { id: asc }
-          limit: $groupLimit
-        ) {
-          id
-          chainId
-          registryAddress
-          groupId
-          memberCount
-        }
-        ${memberPages}
-      }
-    `;
-    const data = await this.query<Record<string, unknown>>(query, {
-      chainId: this.chainId,
-      paymentMethodHashes: configuredHashes,
-      registryAddress: input.registryAddress,
-      groupIds: uniqueGroupIds,
-      pageSize: PAGE_SIZE,
-      groupLimit: uniqueGroupIds.length + 1,
-    });
-
-    const metadataRows = data.chain_metadata;
-    if (!Array.isArray(metadataRows) || metadataRows.length !== 1) {
-      throw new Error("Indexer returned an invalid atomic snapshot metadata row count");
+    const v2Verifiers = [...getV2ChargebackVerifierMap(input.v2Environment).keys()];
+    if (v2Verifiers.length !== 3) {
+      throw new Error("Legacy V2 chargeback verifier mapping is incomplete");
     }
-    const metadata = metadataRows[0] as RawChainMetadata | undefined;
-    if (
-      !metadata ||
-      metadata.chain_id !== this.chainId ||
-      metadata.latest_processed_block === null ||
-      !Number.isSafeInteger(metadata.latest_processed_block) ||
-      metadata.latest_processed_block < 0
-    ) {
-      throw new Error("Indexer returned invalid atomic snapshot metadata");
-    }
-    const snapshotBlock = BigInt(metadata.latest_processed_block);
-
-    const collectPages = <T>(
-      prefix: string,
-      pageCount: number,
-      maximumRows: number,
-      label: string,
-    ): T[] => {
-      const rows: T[] = [];
-      let exhausted = false;
-      for (let index = 0; index < pageCount; index += 1) {
-        const page = data[`${prefix}${index}`];
-        if (!Array.isArray(page)) {
-          throw new Error(`Indexer response omitted ${prefix}${index}`);
-        }
-        if (page.length > PAGE_SIZE) {
-          throw new Error(`Indexer returned an oversized ${label} page`);
-        }
-        if (index === pageCount - 1) {
-          if (page.length > 0) {
-            throw new Error(`Atomic snapshot exceeds the ${label} safety limit`);
-          }
-          break;
-        }
-        if (exhausted && page.length > 0) {
-          throw new Error(`Atomic snapshot returned non-contiguous ${label} pages`);
-        }
-        rows.push(...(page as T[]));
-        if (page.length < PAGE_SIZE) exhausted = true;
-      }
-      if (rows.length > maximumRows) {
-        throw new Error(`Atomic snapshot exceeds the ${label} safety limit`);
-      }
-      return rows;
-    };
-    const rawPlatformRows = collectPages<RawTakerPlatformStats>(
-      "platformPage",
-      ATOMIC_PLATFORM_PAGE_COUNT,
-      MAX_ATOMIC_PLATFORM_ROWS,
-      "TakerPlatformStats",
+    const v2VerifierWhere = v2Verifiers
+      .map((_, index) => `{ verifier: { _ilike: $v2Verifier${index} } }`)
+      .join(", ");
+    const v2VerifierDefinitions = v2Verifiers
+      .map((_, index) => `$v2Verifier${index}: String!`)
+      .join("\n");
+    const v2VerifierVariables = Object.fromEntries(
+      v2Verifiers.map((verifier, index) => [`v2Verifier${index}`, verifier]),
     );
-    const rawMembers = collectPages<RawAddressGroupMember>(
-      "memberPage",
-      ATOMIC_MEMBER_PAGE_COUNT,
-      MAX_ATOMIC_MEMBER_ROWS,
-      "AddressGroupMember",
-    );
-    if (!Array.isArray(data.AddressGroup)) {
-      throw new Error("Indexer response omitted AddressGroup");
-    }
+
+    const [
+      v2Signals,
+      v2Fulfillments,
+      unifiedSignals,
+      unifiedFulfillments,
+      creations,
+      additions,
+      removals,
+    ] = await Promise.all([
+      this.getPinnedEventRows<RawV2IntentSignaled>({
+        root: "Escrow_V2_IntentSignaled",
+        selection: "id intentHash verifier owner",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_SIGNAL_ROWS,
+        additionalWhere: `_or: [${v2VerifierWhere}]`,
+        variableDefinitions: v2VerifierDefinitions,
+        variables: v2VerifierVariables,
+      }),
+      this.getPinnedEventRows<RawV2IntentFulfilled>({
+        root: "Escrow_V2_IntentFulfilled",
+        selection: "id intentHash owner amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_FULFILLMENT_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedIntentSignaled>({
+        root: "Orchestrator_V21_IntentSignaled",
+        selection: "id intentHash paymentMethod owner",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
+        additionalWhere: "paymentMethod: { _in: $paymentMethodHashes }",
+        variableDefinitions: "$paymentMethodHashes: [String!]!",
+        variables: { paymentMethodHashes: configuredHashes },
+      }),
+      this.getPinnedEventRows<RawUnifiedIntentFulfilled>({
+        root: "Orchestrator_V21_IntentFulfilled",
+        selection: "id intentHash amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_FULFILLMENT_ROWS,
+      }),
+      this.getPinnedEventRows<RawGroupCreatedEvent>({
+        root: "AddressGroupRegistry_GroupCreated",
+        selection: "id groupId",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: uniqueGroupIds.length,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberAdded",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberRemoved",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+    ]);
 
     return {
-      takerPlatformStats: this.parseTakerPlatformStatsRows(
-        rawPlatformRows,
-        input.paymentMethodHashes,
-      ),
-      membership: this.buildMembershipSnapshot({
-        registryAddress: input.registryAddress,
-        groupIds: uniqueGroupIds,
-        deploymentBlock: input.deploymentBlock,
-        snapshotBlock,
-        groups: data.AddressGroup as RawAddressGroup[],
-        rawMembers,
+      takerPlatformStats: reconstructPlatformRows({
+        chainId: this.chainId,
+        snapshotBlock: input.snapshotBlock,
+        v2Environment: input.v2Environment,
+        v2Signals,
+        v2Fulfillments,
+        unifiedSignals,
+        unifiedFulfillments,
       }),
+      membership: {
+        membersByGroupId: reconstructMembership({
+          chainId: this.chainId,
+          snapshotBlock: input.snapshotBlock,
+          groupIds: uniqueGroupIds,
+          creations,
+          additions,
+          removals,
+        }),
+        snapshotBlock: input.snapshotBlock,
+        indexedThroughBlock: input.snapshotBlock,
+      },
     };
   }
 

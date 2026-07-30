@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES } from "../src/blockPinnedSnapshot.js";
 
 interface SurfaceCheck {
   producer: string;
@@ -64,16 +65,36 @@ function checkAddressGroupBinding(input: {
   surface: string;
   content: string;
 }): SurfaceCheck {
-  const hasNonzeroAddress =
-    /- name: AddressGroupRegistry\s*\n\s+address:\s*["']0x(?!0{40})[0-9a-fA-F]{40}["']/m.test(
-      input.content,
-    );
+  const bindings = [
+    ...input.content.matchAll(
+      /- name: AddressGroupRegistry\s*\n\s+address:\s*["']0x(?!0{40})[0-9a-fA-F]{40}["']/gm,
+    ),
+  ];
+  const hasExactlyOneNonzeroAddress = bindings.length === 1;
   return {
     producer: "zkp2p-indexer",
     ref: input.ref,
     surface: input.surface,
-    status: hasNonzeroAddress ? "compatible" : "incompatible",
-    missing: hasNonzeroAddress ? [] : ["nonzero AddressGroupRegistry address binding"],
+    status: hasExactlyOneNonzeroAddress ? "compatible" : "incompatible",
+    missing: hasExactlyOneNonzeroAddress
+      ? []
+      : ["exactly one nonzero AddressGroupRegistry address binding"],
+  };
+}
+
+function checkLegacyVerifierMapping(content: string): SurfaceCheck {
+  const missing = V2_CHARGEBACK_VERIFIER_METHOD_ENTRIES.filter(
+    ([verifier, method]) =>
+      !new RegExp(`"${verifier}"\\s*:\\s*\\n?\\s*lookups\\.nameToHash\\.${method}`, "i").test(
+        content,
+      ),
+  ).map(([, method]) => `reviewed V2 ${method} verifier mapping`);
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "legacy V2 chargeback verifier mapping",
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
   };
 }
 
@@ -86,6 +107,18 @@ const contractPaymentMethodSources = ["paypal", "venmo", "cashapp"]
   .map((name) => show(contractsRepo, "origin/main", `deployments/verifiers/${name}.ts`))
   .join("\n");
 const mainIndexerSchema = show(indexerRepo, "origin/main", "schema.graphql");
+const mainIndexerEventSchema = [
+  show(indexerRepo, "origin/main", "schema/events_v2.graphql"),
+  show(indexerRepo, "origin/main", "schema/events_v21.graphql"),
+  show(indexerRepo, "origin/main", "schema/events_v3.graphql"),
+].join("\n");
+const mainIndexerIntentHandlers = [
+  show(indexerRepo, "origin/main", "src/handlers/v2/intentHandlers.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v21/orchestrator_intents.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v22/EventHandler_v22.ts"),
+  show(indexerRepo, "origin/main", "src/handlers/v3/orchestrator_v3.ts"),
+].join("\n");
+const mainIndexerPaymentMethods = show(indexerRepo, "origin/main", "src/utils/paymentMethods.ts");
 const mainTakerPlatformStatsProducer = [
   show(indexerRepo, "origin/main", "src/services/takerPlatformStats.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v2/taker_stats.ts"),
@@ -153,6 +186,40 @@ const runtimeChecks = [
       "paymentMethodHash: intentBefore.paymentMethodHash",
     ],
   }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "block-pinned intent event schemas",
+    content: mainIndexerEventSchema,
+    required: [
+      "type Escrow_V2_IntentSignaled",
+      "verifier: String!",
+      "owner: String!",
+      "type Escrow_V2_IntentFulfilled",
+      "type Orchestrator_V21_IntentSignaled",
+      "paymentMethod: String!",
+      "type Orchestrator_V21_IntentFulfilled",
+      "amount: BigInt!",
+      "type AddressGroupRegistry_GroupCreated",
+      "type AddressGroupRegistry_MemberAdded",
+      "type AddressGroupRegistry_MemberRemoved",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "block-pinned intent event producers",
+    content: mainIndexerIntentHandlers,
+    required: [
+      "context.Escrow_V2_IntentSignaled.set",
+      "context.Escrow_V2_IntentFulfilled.set",
+      "context.Orchestrator_V21_IntentSignaled.set",
+      "context.Orchestrator_V21_IntentFulfilled.set",
+      "onOrchestratorIntentSignaled(",
+      "onOrchestratorIntentFulfilled(",
+    ],
+  }),
+  checkLegacyVerifierMapping(mainIndexerPaymentMethods),
 ];
 
 const forwardChecks: SurfaceCheck[] = [];
@@ -190,6 +257,9 @@ const membershipPrerequisiteChecks = [
     required: [
       "context.AddressGroupMember.set",
       "context.AddressGroupMember.deleteUnsafe",
+      "context.AddressGroupRegistry_GroupCreated.set",
+      "context.AddressGroupRegistry_MemberAdded.set",
+      "context.AddressGroupRegistry_MemberRemoved.set",
       "memberCount: group.memberCount + 1",
       "memberCount: Math.max(0, group.memberCount - 1)",
     ],
@@ -212,7 +282,7 @@ process.stdout.write(
       runtimeChecks,
       forwardChecks,
       membershipPrerequisiteChecks,
-      note: "Chargebackable platform aggregates and every current-membership prerequisite must remain compatible before rollout.",
+      note: "Block-pinned lifecycle/group events, chargeback aggregates, and every current-membership verification prerequisite must remain compatible before rollout.",
     },
     null,
     2,

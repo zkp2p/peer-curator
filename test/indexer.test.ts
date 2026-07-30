@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getV2ChargebackVerifierMap } from "../src/blockPinnedSnapshot.js";
 import { normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import { IndexerClient } from "../src/indexer.js";
 import {
@@ -446,63 +447,50 @@ describe("IndexerClient address-group membership", () => {
   });
 });
 
-describe("IndexerClient atomic reconciliation snapshot", () => {
+describe("IndexerClient block-pinned reconciliation snapshot", () => {
   const registryAddress = normalizeAddress("0x9999999999999999999999999999999999999999");
   const groupId = normalizeGroupId(`0x${"11".repeat(32)}`);
   const member = normalizeAddress("0x2222222222222222222222222222222222222222");
-  const platformRow = {
-    id: `8453_${taker}_${paypalHash}`,
-    chainId: 8453,
-    taker,
-    paymentMethodHash: paypalHash,
-    totalAmountTaken: "500000000",
-  };
-  const groupRow = {
-    id: `8453_${registryAddress}_${groupId}`,
-    chainId: 8453,
-    registryAddress,
-    groupId,
-    memberCount: 1,
-  };
-  const memberRow = {
-    id: `8453_${registryAddress}_${groupId}_${member}`,
-    chainId: 8453,
-    registryAddress,
-    groupId,
-    groupEntityId: `8453_${registryAddress}_${groupId}`,
-    member,
-  };
+  const snapshotBlock = 49_000_000n;
+  const intentHash = `0x${"33".repeat(32)}`;
+  const v2Verifier = [...getV2ChargebackVerifierMap("prod").keys()][0];
+  if (!v2Verifier) throw new Error("Missing fixture V2 verifier");
 
-  function atomicPayload(input?: {
-    nonContiguousPlatformPage?: boolean;
-    platformOverflow?: boolean;
-  }): Record<string, unknown> {
-    const data: Record<string, unknown> = {
-      chain_metadata: [{ chain_id: 8453, latest_processed_block: 120 }],
-      AddressGroup: [groupRow],
-    };
-    for (let index = 0; index < 11; index += 1) {
-      data[`platformPage${index}`] =
-        index === 0 ||
-        (index === 1 && input?.nonContiguousPlatformPage) ||
-        (index === 10 && input?.platformOverflow)
-          ? [platformRow]
-          : [];
-    }
-    for (let index = 0; index < 6; index += 1) {
-      data[`memberPage${index}`] = index === 0 ? [memberRow] : [];
-    }
-    return data;
-  }
-
-  it("reads watermark, aggregates, groups, and members in one GraphQL request", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ data: atomicPayload() }), {
+  function pinnedFetch(input?: { outOfRange?: boolean }): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn().mockImplementation(async (_url, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)) as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      const id = input?.outOfRange ? "8453_49000001_1" : "8453_48999999_1";
+      let rows: Record<string, unknown>[] = [];
+      if (request.query.includes("Escrow_V2_IntentSignaled")) {
+        rows = [
+          {
+            id,
+            intentHash,
+            verifier: v2Verifier,
+            owner: taker,
+          },
+        ];
+      } else if (request.query.includes("Escrow_V2_IntentFulfilled")) {
+        rows = [{ id: "8453_48999999_2", intentHash, owner: taker, amount: "500000000" }];
+      } else if (request.query.includes("AddressGroupRegistry_GroupCreated")) {
+        rows = [{ id: "8453_48999998_1", groupId }];
+      } else if (request.query.includes("AddressGroupRegistry_MemberAdded")) {
+        rows = [{ id: "8453_48999999_3", groupId, member }];
+      }
+      return new Response(JSON.stringify({ data: { rows } }), {
         status: 200,
         headers: { "content-type": "application/json" },
-      }),
-    );
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("constrains every immutable event query to one explicit block", async () => {
+    const fetchMock = pinnedFetch();
     const client = new IndexerClient(
       "https://indexer.example/graphql",
       "test-api-key",
@@ -510,41 +498,31 @@ describe("IndexerClient atomic reconciliation snapshot", () => {
       1_000,
     );
 
-    const snapshot = await client.getAtomicReconciliationSnapshot({
+    const snapshot = await client.getBlockPinnedReconciliationSnapshot({
       registryAddress,
       groupIds: [groupId],
-      deploymentBlock: 100n,
+      deploymentBlock: 48_000_000n,
       paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+      snapshotBlock,
+      v2Environment: "prod",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(snapshot.membership.snapshotBlock).toBe(120n);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(snapshot.membership.snapshotBlock).toBe(snapshotBlock);
     expect(snapshot.membership.membersByGroupId.get(groupId)).toEqual(new Set([member]));
     expect(snapshot.takerPlatformStats).toHaveLength(1);
-    const firstCall = fetchMock.mock.calls[0];
-    if (!firstCall) throw new Error("Expected one GraphQL request");
-    const request = JSON.parse(String((firstCall[1] as RequestInit).body));
-    expect(request.query).toContain("AtomicReconciliationSnapshot");
-    expect(request.query).toContain("platformPage10:");
-    expect(request.query).toContain("memberPage5:");
-    expect(request.query).toContain("chain_metadata");
+    for (const call of fetchMock.mock.calls) {
+      const request = JSON.parse(String((call[1] as RequestInit).body)) as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      expect(request.query).toContain("id: { _gt: $after, _lte: $through }");
+      expect(request.variables.through).toBe("8453_49000000_999999999");
+    }
   });
 
-  it("fails closed when a page appears after an earlier short page", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            data: atomicPayload({ nonContiguousPlatformPage: true }),
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        ),
-      ),
-    );
+  it("fails closed if an indexer returns an event beyond the chosen block", async () => {
+    pinnedFetch({ outOfRange: true });
     const client = new IndexerClient(
       "https://indexer.example/graphql",
       "test-api-key",
@@ -553,25 +531,19 @@ describe("IndexerClient atomic reconciliation snapshot", () => {
     );
 
     await expect(
-      client.getAtomicReconciliationSnapshot({
+      client.getBlockPinnedReconciliationSnapshot({
         registryAddress,
         groupIds: [groupId],
-        deploymentBlock: 100n,
+        deploymentBlock: 48_000_000n,
         paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+        snapshotBlock,
+        v2Environment: "prod",
       }),
-    ).rejects.toThrow("non-contiguous TakerPlatformStats pages");
+    ).rejects.toThrow("outside the requested block snapshot");
   });
 
-  it("fails closed when the explicit overflow page is nonempty", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ data: atomicPayload({ platformOverflow: true }) }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-      ),
-    );
+  it("rejects snapshots outside the event-id ordering window", async () => {
+    pinnedFetch();
     const client = new IndexerClient(
       "https://indexer.example/graphql",
       "test-api-key",
@@ -580,12 +552,14 @@ describe("IndexerClient atomic reconciliation snapshot", () => {
     );
 
     await expect(
-      client.getAtomicReconciliationSnapshot({
+      client.getBlockPinnedReconciliationSnapshot({
         registryAddress,
         groupIds: [groupId],
         deploymentBlock: 100n,
         paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
+        snapshotBlock: 120n,
+        v2Environment: "prod",
       }),
-    ).rejects.toThrow("TakerPlatformStats safety limit");
+    ).rejects.toThrow("outside the fail-closed Base event-id ordering window");
   });
 });

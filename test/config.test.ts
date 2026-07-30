@@ -25,6 +25,7 @@ afterEach(() => {
 
 describe("loadSettings", () => {
   it("applies the bounded addition limits when environment overrides are absent", async () => {
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", "prod");
     vi.stubEnv("MAX_PLANNED_ADDS", undefined);
     vi.stubEnv("MAX_EXECUTED_ADDS_PER_RUN", undefined);
 
@@ -32,6 +33,14 @@ describe("loadSettings", () => {
 
     expect(settings.maxPlannedAdds).toBe(1_500);
     expect(settings.maxExecutedAddsPerRun).toBe(1_000);
+  });
+
+  it("rejects a V2 history selector that mismatches the Railway environment", async () => {
+    vi.stubEnv("RAILWAY_ENVIRONMENT_NAME", "staging");
+    vi.stubEnv("V2_HISTORY_ENVIRONMENT", "prod");
+    await expect(loadSettings("calculate")).rejects.toThrow(
+      "does not match the Railway environment",
+    );
   });
 });
 

@@ -2,6 +2,7 @@ import "dotenv/config";
 
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import type { V2HistoryEnvironment } from "./blockPinnedSnapshot.js";
 import {
   type GroupsConfig,
   groupKey,
@@ -54,6 +55,8 @@ const envSchema = z.object({
   INDEXER_GRAPHQL_URL: z.url().default("https://indexer.zkp2p.xyz/v1/graphql"),
   INDEXER_API_KEY: optionalNonEmptyString,
   CHAIN_ID: positiveInteger("8453"),
+  V2_HISTORY_ENVIRONMENT: z.enum(["staging", "prod"]),
+  RAILWAY_ENVIRONMENT_NAME: optionalNonEmptyString,
   RPC_URL: z.string().optional(),
   GROUPS_CONFIG_PATH: z.string().default("config/groups.json"),
   GROUPS_CONFIG_JSON: z.string().optional(),
@@ -72,7 +75,7 @@ const envSchema = z.object({
     .transform((value) => value === "true"),
   ALLOW_INITIAL_SEED: booleanFromString,
   BATCH_SIZE: positiveInteger("100"),
-  SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("0"),
+  SNAPSHOT_CONFIRMATIONS: nonNegativeInteger("20"),
   MAX_PLANNED_ADDS: nonNegativeInteger("1500"),
   MAX_EXECUTED_ADDS_PER_RUN: positiveInteger("1000"),
   MAX_TOTAL_REMOVALS: nonNegativeInteger("100"),
@@ -109,6 +112,7 @@ export type Command = "calculate" | "verify" | "plan" | "sync";
 export interface RuntimeSettings {
   command: Command;
   chainId: number;
+  v2HistoryEnvironment: V2HistoryEnvironment;
   indexerUrl: string;
   indexerApiKey?: string;
   rpcUrl?: string;
@@ -204,6 +208,15 @@ async function readGroupsConfig(
 
 export async function loadSettings(command: Command): Promise<RuntimeSettings> {
   const env = envSchema.parse(process.env);
+  const expectedV2Environment =
+    env.RAILWAY_ENVIRONMENT_NAME === "production"
+      ? "prod"
+      : env.RAILWAY_ENVIRONMENT_NAME === "staging"
+        ? "staging"
+        : undefined;
+  if (expectedV2Environment && env.V2_HISTORY_ENVIRONMENT !== expectedV2Environment) {
+    throw new Error("V2_HISTORY_ENVIRONMENT does not match the Railway environment");
+  }
   if (env.MAX_REMOVAL_BPS_PER_GROUP > 10_000) {
     throw new Error("MAX_REMOVAL_BPS_PER_GROUP cannot exceed 10000");
   }
@@ -229,6 +242,7 @@ export async function loadSettings(command: Command): Promise<RuntimeSettings> {
   return {
     command,
     chainId: env.CHAIN_ID,
+    v2HistoryEnvironment: env.V2_HISTORY_ENVIRONMENT,
     indexerUrl: env.INDEXER_GRAPHQL_URL,
     ...(env.INDEXER_API_KEY ? { indexerApiKey: env.INDEXER_API_KEY } : {}),
     ...(env.RPC_URL ? { rpcUrl: env.RPC_URL } : {}),

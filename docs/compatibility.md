@@ -6,9 +6,11 @@ Baseline reviewed on 2026-07-30.
 |---|---|---|
 | Contracts `origin/main` | payment-method lookups | canonical PayPal, Venmo, and Cash App name/hash mappings consumed from `@zkp2p/contracts-v2@0.3.0` |
 | Contracts `origin/main` | `AddressGroupRegistry` | bytes32 group IDs; five-value `getGroup`; `addMembers` and `removeMembers` |
-| Indexer qualification aggregates | `TakerPlatformStats` | `chainId`, `taker`, `paymentMethodHash`, and `totalAmountTaken` for bounded fixed pages plus an explicit overflow page |
-| Indexer current membership | `AddressGroup`, `AddressGroupMember` | all three groups enumerable, with `memberCount` equal to the matching member rows |
-| Indexer synchronization | `chain_metadata` | one valid processed-block watermark co-read with every reconciliation root in one GraphQL document |
+| Indexer qualification events | `Escrow_V2_IntentSignaled/Fulfilled`, `Orchestrator_V21_IntentSignaled/Fulfilled` | immutable event IDs encode chain/block/log; signal rows provide taker/platform and fulfillment rows provide filled amount |
+| Indexer legacy mapping | `src/utils/paymentMethods.ts` | reviewed environment-specific V2 verifier-to-method mapping selected by `V2_HISTORY_ENVIRONMENT`; canonical method hashes remain consumed from contracts |
+| Indexer membership events | `AddressGroupRegistry_GroupCreated/MemberAdded/MemberRemoved` | immutable event IDs encode chain/block/log and allow deterministic membership replay |
+| Indexer current projections | `TakerPlatformStats`, `AddressGroup`, `AddressGroupMember` | calculation parity and post-run member-count/enumeration verification |
+| Indexer synchronization | `chain_metadata` | one valid processed-block watermark from which an explicit confirmed block can be selected |
 | Indexer environment config | `AddressGroupRegistry` source | a nonzero registry address bound in the matching environment |
 | Curator history | tier policy and blocked wallets | provenance only; there is no runtime Curator dependency |
 
@@ -22,24 +24,21 @@ deployed and bound.
 
 For `plan` and `sync`, the reconciler:
 
-- requests `chain_metadata`, qualifying `TakerPlatformStats` fixed/overflow
-  pages, configured `AddressGroup` rows, and `AddressGroupMember`
-  fixed/overflow pages in one GraphQL document that Hasura compiles to one SQL
-  statement;
-- enumerates `AddressGroupMember` for exactly the configured chain, registry,
-  and bytes32 group IDs and fails above the hard row caps;
-- requires every `AddressGroup` row and verifies `memberCount` parity;
-- requires fixed pages to be contiguous and both overflow pages to be empty;
-- requires the co-read watermark to be at least `SNAPSHOT_CONFIRMATIONS` behind
-  the RPC head;
-- reads bytecode and `getGroup` at that exact watermark.
+- chooses `min(indexer watermark, RPC head - SNAPSHOT_CONFIRMATIONS)`;
+- bounds every immutable event query to that exact block through the encoded
+  event ID and revalidates every returned chain/block/log tuple locally;
+- reconstructs chargebackable taker totals from the V2 and unified lifecycle
+  streams and group membership from creation/add/remove streams;
+- fails on duplicate or malformed events, missing correlations, impossible
+  membership transitions, non-advancing pagination, or hard row caps;
+- reads bytecode and `getGroup` at that exact block.
 
-This accepts an indexer that is behind the RPC head; it never demands that the
-indexer reach a block derived from the latest RPC tip. It also avoids using an
-unconfirmed latest indexer state. Envio/Hasura does not expose a historical
-block argument for these mutable domain entities, so multiple requests cannot
-be treated as block-pinned. The single compiled SQL statement is the consistency
-boundary.
+This accepts an indexer behind the RPC head and remains consistent while its
+watermark advances because rows at or below the chosen finalized block are
+immutable. Envio/Hasura does not expose historical block arguments for mutable
+domain entities, so those entities are intentionally excluded from plan/sync
+state construction. They remain the post-run verification surface after the
+watermark covers the last receipt.
 
 RPC remains the source for pinned contract governance, simulation, writes, and
 receipts. It is not used to enumerate members or scan logs.

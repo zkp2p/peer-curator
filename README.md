@@ -93,17 +93,21 @@ Removing a pin returns that wallet to the calculated policy on the next sync.
 
 - Cascading groups: a member of a tier belongs to every lower tier in the same policy family.
   `assertCascadingSets` enforces this on every calculated snapshot.
-- Current curated state comes from `AddressGroup` and `AddressGroupMember`.
-- For `plan` and `sync`, the watermark, qualifying aggregates, group rows, and
-  member rows are returned by one bounded GraphQL document. Hasura compiles the
-  document to one SQL statement, so every root field shares one database snapshot.
-- Fixed 1,000-row pages must be contiguous and their explicit overflow pages
-  must be empty. The run fails closed above 10,000 qualifying platform rows or
-  5,000 configured-group member rows.
-- That watermark must be at least `SNAPSHOT_CONFIRMATIONS` behind the RPC head;
-  a fresh, unconfirmed indexer tip is never used.
-- Every configured group must exist, and its indexed `memberCount` must equal
-  the enumerated member rows.
+- `plan` and `sync` choose one explicit block no later than both the indexer
+  watermark and the confirmed RPC head.
+- Qualifying volume is reconstructed from the immutable V2 and unified
+  intent signal/fulfillment event projections at or below that block. Legacy
+  V2 verifier names come from the reviewed indexer mapping; canonical
+  payment-method hashes still come from `@zkp2p/contracts-v2`.
+- Current group membership is replayed from immutable `GroupCreated`,
+  `MemberAdded`, and `MemberRemoved` projections at or below the same block.
+- Every event query includes an explicit event-id upper bound for the chosen
+  block, every returned id is parsed and revalidated, pagination must advance,
+  and hard row caps stop unexpectedly large histories.
+- RPC bytecode and `getGroup` governance reads use that exact block.
+- The Base event-id ordering window is deliberately fail-closed at blocks
+  10,000,000–99,999,999; the query strategy must be reviewed before Base
+  reaches the upper boundary.
 - Indexer or RPC failures stop the run.
 - Missing GraphQL fields stop the run.
 - Nonexistent groups, unexpected resolvers, or a signer that is not the group
@@ -203,12 +207,15 @@ re-derive them if the population shifts materially.
 Runtime credentials:
 
 - `INDEXER_API_KEY` — optional; public indexer access is rate-limited.
+- `V2_HISTORY_ENVIRONMENT` — required historical V2 mapping selector:
+  `staging` or `prod`. It must match the indexer deployment.
 - `RPC_URL` — required for `plan` and `sync`.
 - `GROUP_ADMIN_PRIVATE_KEY` — required only for execution.
 
-`SNAPSHOT_CONFIRMATIONS` is the minimum RPC confirmation depth required for
-the processed-block watermark returned inside the atomic indexer snapshot.
-The reconciler does not require the indexer to catch up to the RPC head.
+`SNAPSHOT_CONFIRMATIONS` is the minimum RPC confirmation depth used when
+choosing the explicit block. The chosen block is
+`min(indexer watermark, RPC head - confirmations)`, so the reconciler does not
+require the indexer to catch up to the RPC head.
 
 The private key must resolve to the curator returned by `getGroup` for every
 configured group.
@@ -226,7 +233,7 @@ pnpm check
 pnpm check:upstream
 ```
 
-## Indexer-backed current membership
+## Block-pinned indexer reconstruction
 
 `AddressGroupRegistry.members(groupId, wallet)` answers whether one known
 wallet is curated, but the contract does not enumerate all members. The
@@ -235,24 +242,21 @@ set; a row is created on `MemberAdded` and deleted on `MemberRemoved`.
 
 For `plan` and `sync`, the service:
 
-1. Sends one GraphQL document containing `chain_metadata.latest_processed_block`,
-   all qualifying `TakerPlatformStats` fixed pages and an overflow page, the
-   three `AddressGroup` rows, and all matching `AddressGroupMember` fixed pages
-   and an overflow page.
-2. Requires pages to be contiguous and both overflow pages to be empty. Hasura
-   compiles the document to one SQL statement, so these roots cannot mix
-   indexer database states.
-3. Treats the co-read watermark as the chosen snapshot block and requires it
-   not to be ahead of the RPC head. A nonzero
-   `SNAPSHOT_CONFIRMATIONS` can additionally require an indexer deployment
-   that deliberately trails the chain; continuously synced deployments should
-   leave it at `0`.
-4. Reads bytecode and `getGroup` governance at that exact block.
+1. Reads the indexer watermark and RPC head, then chooses one explicitly
+   confirmed block.
+2. Queries only immutable event projections with event-id bounds ending at
+   that block. V2 and unified signal/fulfillment streams reconstruct the exact
+   `TakerPlatformStats.totalAmountTaken` semantics for PayPal, Venmo, and Cash
+   App. Group creation/add/remove streams reconstruct enumerable membership.
+3. Revalidates chain, block, log index, hashes, addresses, uniqueness,
+   lifecycle correlation, membership transitions, pagination, and row caps.
+4. Reads bytecode and `getGroup` governance at the same block.
 
-The indexer surface is a hard dependency. Missing group rows, a member-count
-mismatch, non-contiguous pages, a row-cap overflow, insufficient
-confirmations, or an unavailable field stops the run before a transaction can
-be built. There is no RPC-log fallback.
+The indexer surface is a hard dependency. A missing event field, malformed or
+out-of-range event id, duplicate lifecycle event, impossible membership
+transition, row-cap overflow, insufficient confirmations, or unavailable
+query stops the run before a transaction can be built. There is no mutable-root
+timing assumption and no RPC-log fallback.
 
 Recommended rollout:
 
@@ -322,9 +326,10 @@ The Docker image executes one command and exits. `RUN_COMMAND` selects
 0 */12 * * *
 ```
 
-Each `plan` or `sync` run uses one atomic, sufficiently confirmed indexer
-snapshot. Transactions are considered only after its fixed and overflow pages,
-membership parity, block watermark, and pinned on-chain governance all validate.
+Each `plan` or `sync` run uses one explicit, sufficiently confirmed block.
+Transactions are considered only after every immutable event page, parsed
+event bound, reconstructed membership transition, indexer watermark, and
+pinned on-chain governance read validates.
 
 New environments should start with `RUN_COMMAND=calculate` and `EXECUTE=false`.
 This mode needs only the indexer and can run before the registry groups,
@@ -346,8 +351,10 @@ contracts or indexer.
 
 ## Known upstream drift
 
-The service requires `TakerPlatformStats` plus `AddressGroup`,
-`AddressGroupMember`, `chain_metadata`, and an environment-specific nonzero
-registry binding. See [docs/compatibility.md](docs/compatibility.md).
+The service requires the V2 and unified intent event projections,
+`AddressGroupRegistry` creation/member event projections, `chain_metadata`,
+the mutable aggregate/projection surfaces used for calculation and post-run
+verification, and an environment-specific nonzero registry binding. See
+[docs/compatibility.md](docs/compatibility.md).
 `pnpm check:upstream` fails if a required contract, schema, handler, or source
 binding is absent.
