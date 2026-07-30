@@ -4,7 +4,7 @@ import { base } from "viem/chains";
 import { calculateDesiredSnapshot, calculateDesiredSnapshotFromRows } from "./calculate.js";
 import type { RuntimeSettings } from "./config.js";
 import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
-import { IndexerClient } from "./indexer.js";
+import { type BlockPinnedReconciliationSnapshot, IndexerClient } from "./indexer.js";
 import type { Logger } from "./logger.js";
 import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
@@ -47,6 +47,18 @@ export function choosePinnedSnapshotBlock(input: {
   return input.indexedThroughBlock < confirmedRpcBlock
     ? input.indexedThroughBlock
     : confirmedRpcBlock;
+}
+
+export function assertMatchingSnapshotEvidence(
+  first: BlockPinnedReconciliationSnapshot,
+  second: BlockPinnedReconciliationSnapshot,
+): void {
+  if (
+    first.membership.snapshotBlock !== second.membership.snapshotBlock ||
+    first.evidenceDigest !== second.evidenceDigest
+  ) {
+    throw new Error("Indexer event evidence changed between block-pinned reconstruction passes");
+  }
 }
 
 export async function run(
@@ -94,26 +106,40 @@ export async function run(
           confirmationBlocks,
         })
       : undefined;
-  const pinnedSnapshot =
+  const pinnedSnapshotInput =
     reconciliationRun && settings.groups && snapshotBlock !== undefined
-      ? await indexer.getBlockPinnedReconciliationSnapshot({
+      ? {
           registryAddress: settings.groups.registryAddress,
           groupIds: settings.groups.groups.map((group) => group.groupId),
           deploymentBlock: settings.groups.registryDeploymentBlock,
           paymentMethodHashes: CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET,
           snapshotBlock,
           v2Environment: settings.v2HistoryEnvironment,
-        })
+        }
       : undefined;
+  let pinnedSnapshot = pinnedSnapshotInput
+    ? await indexer.getBlockPinnedReconciliationSnapshot(pinnedSnapshotInput)
+    : undefined;
   if (pinnedSnapshot) {
-    const finalIndexedThroughBlock = await indexer.getIndexedThroughBlock();
+    const firstFinalIndexedThroughBlock = await indexer.getIndexedThroughBlock();
     if (
       indexedThroughBlock === undefined ||
-      finalIndexedThroughBlock < pinnedSnapshot.membership.snapshotBlock
+      firstFinalIndexedThroughBlock < pinnedSnapshot.membership.snapshotBlock
     ) {
       throw new Error("Indexer watermark fell below the chosen snapshot block");
     }
-    indexedThroughBlock = finalIndexedThroughBlock;
+    if (!pinnedSnapshotInput) {
+      throw new Error("Block-pinned snapshot input is unavailable");
+    }
+    const verifiedSnapshot =
+      await indexer.getBlockPinnedReconciliationSnapshot(pinnedSnapshotInput);
+    const secondFinalIndexedThroughBlock = await indexer.getIndexedThroughBlock();
+    if (secondFinalIndexedThroughBlock < verifiedSnapshot.membership.snapshotBlock) {
+      throw new Error("Indexer watermark fell below the chosen snapshot block");
+    }
+    assertMatchingSnapshotEvidence(pinnedSnapshot, verifiedSnapshot);
+    pinnedSnapshot = verifiedSnapshot;
+    indexedThroughBlock = secondFinalIndexedThroughBlock;
   }
   const desired = pinnedSnapshot
     ? calculateDesiredSnapshotFromRows(settings, pinnedSnapshot.takerPlatformStats)

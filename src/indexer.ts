@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Address, Hex } from "viem";
 import {
   buildPinnedEventIdBounds,
@@ -31,6 +32,7 @@ export interface IndexedMembershipSnapshot {
 export interface BlockPinnedReconciliationSnapshot {
   takerPlatformStats: TakerPlatformStatsRow[];
   membership: IndexedMembershipSnapshot;
+  evidenceDigest: Hex;
 }
 
 interface GraphQlError {
@@ -56,6 +58,13 @@ interface RawAddressGroup {
   registryAddress: string;
   groupId: string;
   memberCount: number;
+}
+
+interface RawAddressGroupBinding {
+  id: string;
+  chainId: number;
+  registryAddress: string;
+  groupId: string;
 }
 
 interface RawAddressGroupMember {
@@ -204,6 +213,68 @@ export class IndexerClient {
       throw new Error("Indexer response omitted AddressGroup");
     }
     return data.AddressGroup;
+  }
+
+  private async getGroupBindingRows(groupIds: GroupId[]): Promise<RawAddressGroupBinding[]> {
+    const query = `
+      query GroupRegistryBinding(
+        $chainId: Int!
+        $groupIds: [String!]!
+        $limit: Int!
+      ) {
+        AddressGroup(
+          where: {
+            chainId: { _eq: $chainId }
+            groupId: { _in: $groupIds }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          registryAddress
+          groupId
+        }
+      }
+    `;
+    const data = await this.query<{ AddressGroup: RawAddressGroupBinding[] }>(query, {
+      chainId: this.chainId,
+      groupIds,
+      limit: groupIds.length + 1,
+    });
+    if (!Array.isArray(data.AddressGroup)) {
+      throw new Error("Indexer response omitted the group registry binding");
+    }
+    return data.AddressGroup;
+  }
+
+  private assertGroupRegistryBinding(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    rows: RawAddressGroupBinding[];
+  }): void {
+    if (input.rows.length !== input.groupIds.length) {
+      throw new Error("Indexer group projection does not uniquely bind the configured registry");
+    }
+    const expectedGroupIds = new Set(input.groupIds);
+    const seenGroupIds = new Set<GroupId>();
+    for (const row of input.rows) {
+      const registryAddress = normalizeAddress(row.registryAddress, "AddressGroup.registryAddress");
+      const groupId = normalizeGroupId(row.groupId, "AddressGroup.groupId");
+      const expectedId = `${this.chainId}_${input.registryAddress}_${groupId}`;
+      if (
+        row.chainId !== this.chainId ||
+        registryAddress !== input.registryAddress ||
+        !expectedGroupIds.has(groupId) ||
+        row.id.toLowerCase() !== expectedId
+      ) {
+        throw new Error("Indexer group projection is bound to an unexpected registry");
+      }
+      if (seenGroupIds.has(groupId)) {
+        throw new Error("Indexer group projection contains a duplicate group binding");
+      }
+      seenGroupIds.add(groupId);
+    }
   }
 
   private async getConfiguredAddressGroupMembers(input: {
@@ -568,6 +639,7 @@ export class IndexerClient {
       creations,
       additions,
       removals,
+      groupBindings,
     ] = await Promise.all([
       this.getPinnedEventRows<RawV2IntentSignaled>({
         root: "Escrow_V2_IntentSignaled",
@@ -626,9 +698,32 @@ export class IndexerClient {
         variableDefinitions: "$groupIds: [String!]!",
         variables: { groupIds: uniqueGroupIds },
       }),
+      this.getGroupBindingRows(uniqueGroupIds),
     ]);
+    this.assertGroupRegistryBinding({
+      registryAddress: input.registryAddress,
+      groupIds: uniqueGroupIds,
+      rows: groupBindings,
+    });
+
+    const evidenceDigest = `0x${createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshotBlock: input.snapshotBlock.toString(),
+          v2Signals,
+          v2Fulfillments,
+          unifiedSignals,
+          unifiedFulfillments,
+          creations,
+          additions,
+          removals,
+          groupBindings,
+        }),
+      )
+      .digest("hex")}` as Hex;
 
     return {
+      evidenceDigest,
       takerPlatformStats: reconstructPlatformRows({
         chainId: this.chainId,
         snapshotBlock: input.snapshotBlock,

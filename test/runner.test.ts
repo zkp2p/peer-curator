@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { TIERS } from "../src/domain.js";
 import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "../src/phases.js";
 import { buildReconciliationPlan } from "../src/reconcile.js";
-import { assertPinnedIndexerSnapshot, choosePinnedSnapshotBlock } from "../src/runner.js";
+import {
+  assertMatchingSnapshotEvidence,
+  assertPinnedIndexerSnapshot,
+  choosePinnedSnapshotBlock,
+} from "../src/runner.js";
 import { addr, applyMutations, groupId, planFixture } from "./fixtures.js";
 
 describe("assertPinnedIndexerSnapshot", () => {
@@ -54,6 +58,28 @@ describe("assertPinnedIndexerSnapshot", () => {
         confirmationBlocks: 20n,
       }),
     ).toBe(175n);
+  });
+});
+
+describe("assertMatchingSnapshotEvidence", () => {
+  const snapshot = (digestDigit: string) => ({
+    takerPlatformStats: [],
+    membership: {
+      membersByGroupId: new Map(),
+      snapshotBlock: 180n,
+      indexedThroughBlock: 180n,
+    },
+    evidenceDigest: `0x${digestDigit.repeat(64)}` as `0x${string}`,
+  });
+
+  it("accepts two byte-identical reconstruction passes", () => {
+    expect(() => assertMatchingSnapshotEvidence(snapshot("1"), snapshot("1"))).not.toThrow();
+  });
+
+  it("rejects changed event evidence at the same block", () => {
+    expect(() => assertMatchingSnapshotEvidence(snapshot("1"), snapshot("2"))).toThrow(
+      "changed between block-pinned reconstruction passes",
+    );
   });
 });
 

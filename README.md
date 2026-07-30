@@ -101,11 +101,17 @@ Removing a pin returns that wallet to the calculated policy on the next sync.
   payment-method hashes still come from `@zkp2p/contracts-v2`.
 - Current group membership is replayed from immutable `GroupCreated`,
   `MemberAdded`, and `MemberRemoved` projections at or below the same block.
+- The mutable `AddressGroup` projection is used only to prove that all three
+  configured group IDs uniquely belong to the configured registry; its
+  membership fields never feed the plan.
 - Every event query includes an explicit event-id upper bound for the chosen
   block, every returned id is parsed and revalidated, pagination must advance,
   and hard row caps stop unexpectedly large histories.
 - A final watermark read must still cover the chosen block; advancement is
   allowed, but rollback/reindex below the snapshot fails closed.
+- The entire bounded reconstruction is performed twice with watermark fences.
+  Both full evidence digests must match byte-for-byte, which detects a
+  rollback/reindex that changes or temporarily omits any event page.
 - RPC bytecode and `getGroup` governance reads use that exact block.
 - The Base event-id ordering window is deliberately fail-closed at blocks
   10,000,000–99,999,999; the query strategy must be reviewed before Base
@@ -250,9 +256,13 @@ For `plan` and `sync`, the service:
    that block. V2 and unified signal/fulfillment streams reconstruct the exact
    `TakerPlatformStats.totalAmountTaken` semantics for PayPal, Venmo, and Cash
    App. Group creation/add/remove streams reconstruct enumerable membership.
-3. Revalidates chain, block, log index, hashes, addresses, uniqueness,
+3. Requires the current `AddressGroup` projection to bind the configured IDs
+   uniquely to the configured registry.
+4. Revalidates chain, block, log index, hashes, addresses, uniqueness,
    lifecycle correlation, membership transitions, pagination, and row caps.
-4. Reads bytecode and `getGroup` governance at the same block.
+5. Repeats the full reconstruction and requires identical evidence digests
+   with a covering watermark after each pass.
+6. Reads bytecode and `getGroup` governance at the same block.
 
 The indexer surface is a hard dependency. A missing event field, malformed or
 out-of-range event id, duplicate lifecycle event, impossible membership

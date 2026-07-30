@@ -29,9 +29,12 @@ For `plan` and `sync`, the reconciler:
   event ID and revalidates every returned chain/block/log tuple locally;
 - reconstructs chargebackable taker totals from the V2 and unified lifecycle
   streams and group membership from creation/add/remove streams;
+- requires the current `AddressGroup` projection to bind all configured group
+  IDs uniquely to the configured registry;
 - fails on duplicate or malformed events, missing correlations, impossible
   membership transitions, non-advancing pagination, or hard row caps;
-- rereads the watermark and fails if it fell below the chosen block;
+- performs two complete reconstructions, with a covering watermark after each,
+  and requires byte-identical full event-evidence digests;
 - reads bytecode and `getGroup` at that exact block.
 
 This accepts an indexer behind the RPC head and remains consistent while its
