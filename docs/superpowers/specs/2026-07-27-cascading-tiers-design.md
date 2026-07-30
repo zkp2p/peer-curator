@@ -33,9 +33,11 @@ Two policy scopes (`historical-taker`, `current-earn`) × three tiers (`PEER`, `
 - `src/runner.ts` — logged transaction hashes only after `executeMutations` returned.
 - `scripts/compare-local.ts` — compared against per-tier seed files, assuming exclusive sets.
 
-Tier calculation is **unchanged** by this design: volume definitions, thresholds, the
-`lockScore / max(totalFulfilledVolume, 250 USDC)` dilution, the one-tier-per-crossed-threshold
-demotion, and the fold of the internal `TOP` band into public `PRO` all stay as they were.
+The 2026-07-30 policy cut keeps the cascading design but replaces its
+qualification input. Tier calculation now uses only the per-wallet sum of
+fulfilled PayPal, Venmo, and Cash App `TakerPlatformStats.totalAmountTaken`.
+There is no cancellation or lock-score adjustment and no internal tier above
+public `PRO`.
 
 ## Terminology: "public" is overloaded
 
@@ -48,22 +50,12 @@ That is NOT the registry's `isPublic` flag. `getGroup` returns `bool isPublic`, 
 add themselves and destroy the curated semantics. All groups are `isPublic == false` with a
 curator equal to the signer.
 
-## Measured production data (Base 8453, live indexer, 2026-07-27)
+## Measured production data (Base 8453, live indexer, 2026-07-30)
 
-Source rows: TakerStats 10,061; MakerPlatformStats 2,341; MakerPeerPayStats 379.
-current-earn candidates (union of maker addresses) = 1,797.
-
-Exclusive (previous) populations → cascading (new) group populations:
-
-| | PEER | PLUS | PRO |
-|---|---|---|---|
-| historical-taker | 856 → 1,712 | 645 → 856 | 211 → 211 |
-| current-earn | 419 → 638 | 154 → 219 | 65 → 65 |
-
-Total memberships: **3,684 cascading** versus 2,350 exclusive — roughly 1,350 net adds.
-
-Post-denylist counts from a live `pnpm calculate` after implementation: 1,704 / 849 / 210
-historical and 638 / 219 / 65 earn.
+The chargeback-only input contained 4,443 qualifying platform rows across
+3,894 wallets. After the committed denylist and cumulative thresholds, the
+desired counts were 451 Peer, 246 Plus, and 81 Pro (778 total memberships).
+Current-Earn candidates are not queried or calculated.
 
 These figures are one snapshot and are the basis for every `minimumMembers` / `maximumMembers`
 value below. Record that date beside the constants; otherwise the thresholds become unexplained

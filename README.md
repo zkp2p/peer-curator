@@ -4,7 +4,7 @@ Calculates and maintains the three-tier, cascading `historical-taker` policy
 family in `AddressGroupRegistry`. Current-Earn tiers are intentionally not
 calculated or reconciled.
 
-The service pulls production indexer aggregates, excludes wallets whose
+The service pulls environment-matched indexer aggregates, excludes wallets whose
 address hashes are in the committed denylist, calculates desired membership,
 reads current registry membership from the indexer's canonical
 `AddressGroupMember` projection, and submits the minimal add/remove transaction
@@ -26,13 +26,13 @@ lower-tier access.
 The volume bands below are therefore entry *floors*, not band populations. Crossing $2,000 of
 historical volume adds a wallet to Plus while it remains in Peer.
 
-| Scope | Peer | Plus | Pro | Lock-score thresholds |
-|---|---:|---:|---:|---|
-| Historical taker | $500 | $2,000 | $10,000+ | 50 / 200 / 500 / 1,000 |
+| Scope | Peer | Plus | Pro |
+|---|---:|---:|---:|
+| Historical taker | $500 | $2,000 | $10,000+ |
 
 Because membership is cumulative, a promotion is adds-only — a wallet crossing a threshold is
-added to the higher group and stays in the lower ones. Removals happen only on lock-score
-demotion or denylisting.
+added to the higher group and stays in the lower ones. Removals are limited to denylisting,
+reviewed source corrections, or repair of unexpected on-chain state.
 
 ## Public means readable, not self-service
 
@@ -43,11 +43,14 @@ All three groups are created with `isPublic == false` and a curator equal to the
 membership and would let anyone add themselves. `assertRegistryGovernance` rejects any
 configured group with `isPublic == true`; do not weaken that check.
 
-Historical volume is `TakerStats.totalFulfilledVolume`. The policy dilutes `lockScore` by
-`max(TakerStats.totalFulfilledVolume, 250 USDC)` and demotes one tier per crossed
-threshold. The preserved legacy calculation has an additional internal top
-band so lock-score demotions remain faithful, but that band is folded into the
-public Pro group. There are no address-specific tier overrides.
+Qualification volume is the per-wallet sum of
+`TakerPlatformStats.totalAmountTaken` for exactly PayPal, Venmo, and Cash App.
+The three canonical payment-method hashes are resolved from
+`@zkp2p/contracts-v2/paymentMethods/lookups.json` and cross-checked against
+their canonical keccak hashes at startup. All other payment platforms
+contribute zero. `TakerStats.totalFulfilledVolume`, cancellation volume, and
+lock-score data are not queried or used. There are no address-specific tier
+overrides.
 
 ## Static blocked-wallet snapshot
 
@@ -230,7 +233,7 @@ set; a row is created on `MemberAdded` and deleted on `MemberRemoved`.
 For `plan` and `sync`, the service:
 
 1. Captures `chain_metadata.latest_processed_block`.
-2. Reads all desired-tier aggregates, the three `AddressGroup` rows, and every
+2. Reads all qualifying `TakerPlatformStats` rows, the three `AddressGroup` rows, and every
    matching `AddressGroupMember` row.
 3. Reads the watermark again and requires it to be unchanged, preventing a
    reconciliation across two indexer states as far as the Envio/Hasura query
@@ -257,8 +260,8 @@ Recommended rollout:
 5. Run `plan`. Review the `removalReasons` report; if it is non-empty, get that approved
    separately before proceeding. Cascading membership is a superset of exclusive membership, so
    the change to cascading does not by itself imply any removal. Removals can still legitimately
-   arise where the deployed state has diverged from current desired membership — lock-score
-   demotions since the last sync, denylist additions, a seed taken from an older snapshot, or
+   arise where the deployed state has diverged from current desired membership — denylist
+   additions, a seed taken from an older snapshot, an upstream data correction, or
    manual registry edits. `removalReasons` categorises them; every one still needs review.
 6. For an empty registry, set `ALLOW_INITIAL_SEED=true` only for the approved first `sync` with
    `EXECUTE=true`, then return it to `false`.
@@ -276,9 +279,10 @@ Recommended rollout:
    `totalRemovals` and `removalWalletCount` so you can tell which one is binding.
 10. Confirm `plan` reports `phase: NORMAL`, then resume the cron.
 
-The historical policy produced 2,780 cumulative memberships in the latest validation, inside one
-run at the default `MAX_EXECUTED_ADDS_PER_RUN=3000`. Measure the real diff rather than trusting
-that estimate.
+The production policy produced 778 cumulative memberships in the 2026-07-30
+validation (451 Peer, 246 Plus, 81 Pro), inside one run at the default
+`MAX_EXECUTED_ADDS_PER_RUN=1000`. Measure the real diff rather than trusting
+that snapshot.
 
 ## Recovery
 
@@ -339,7 +343,7 @@ contracts or indexer.
 
 ## Known upstream drift
 
-The service requires `TakerStats` plus `AddressGroup`,
+The service requires `TakerPlatformStats` plus `AddressGroup`,
 `AddressGroupMember`, `chain_metadata`, and an environment-specific nonzero
 registry binding. See [docs/compatibility.md](docs/compatibility.md).
 `pnpm check:upstream` fails if a required contract, schema, handler, or source

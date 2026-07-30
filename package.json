@@ -25,6 +25,7 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
+    "@zkp2p/contracts-v2": "0.3.0",
     "dotenv": "16.6.1",
     "pino": "10.3.1",
     "viem": "2.55.8",

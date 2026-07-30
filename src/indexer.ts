@@ -1,11 +1,12 @@
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import { type GroupId, normalizeAddress, normalizeGroupId } from "./domain.js";
+import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 
-export interface TakerStatsRow {
+export interface TakerPlatformStatsRow {
   id: string;
-  owner: Address;
-  totalFulfilledVolume: bigint;
-  lockScore: bigint;
+  taker: Address;
+  paymentMethodHash: Hex;
+  totalAmountTaken: bigint;
 }
 
 export interface IndexedMembershipSnapshot {
@@ -23,11 +24,12 @@ interface GraphQlResponse<T> {
   errors?: GraphQlError[];
 }
 
-interface RawTakerStats {
+interface RawTakerPlatformStats {
   id: string;
-  owner: string;
-  totalFulfilledVolume: string;
-  lockScore: string;
+  chainId: number;
+  taker: string;
+  paymentMethodHash: string;
+  totalAmountTaken: string;
 }
 
 interface RawAddressGroup {
@@ -108,46 +110,6 @@ export class IndexerClient {
     }
 
     throw lastError ?? new Error("Indexer request failed");
-  }
-
-  private async pageAll<T extends { id: string }>(entity: string, fields: string): Promise<T[]> {
-    const query = `
-      query Page($chainId: Int!, $after: String!, $limit: Int!) {
-        ${entity}(
-          where: { chainId: { _eq: $chainId }, id: { _gt: $after } }
-          order_by: { id: asc }
-          limit: $limit
-        ) {
-          ${fields}
-        }
-      }
-    `;
-
-    const rows: T[] = [];
-    let after = "";
-    for (;;) {
-      const data = await this.query<Record<string, T[]>>(query, {
-        chainId: this.chainId,
-        after,
-        limit: PAGE_SIZE,
-      });
-      const page = data[entity];
-      if (!page) {
-        throw new Error(`Indexer response omitted ${entity}`);
-      }
-      rows.push(...page);
-      if (page.length < PAGE_SIZE) break;
-      const next = page.at(-1)?.id;
-      if (!next || next <= after) {
-        throw new Error(`Indexer pagination did not advance for ${entity}`);
-      }
-      after = next;
-    }
-
-    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
-      throw new Error(`Indexer returned duplicate ${entity} rows`);
-    }
-    return rows;
   }
 
   public async getIndexedThroughBlock(): Promise<bigint> {
@@ -394,16 +356,110 @@ export class IndexerClient {
     };
   }
 
-  public async getTakerStats(): Promise<TakerStatsRow[]> {
-    const rows = await this.pageAll<RawTakerStats>(
-      "TakerStats",
-      "id owner totalFulfilledVolume lockScore",
-    );
-    return rows.map((row) => ({
-      id: row.id,
-      owner: normalizeAddress(row.owner, "TakerStats.owner"),
-      totalFulfilledVolume: BigInt(row.totalFulfilledVolume),
-      lockScore: BigInt(row.lockScore),
-    }));
+  public async getTakerPlatformStats(
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): Promise<TakerPlatformStatsRow[]> {
+    if (paymentMethodHashes.size === 0) {
+      throw new Error("At least one chargebackable payment-method hash is required");
+    }
+    const configuredHashes = [...paymentMethodHashes];
+    if (
+      configuredHashes.some((hash) => !/^0x[0-9a-f]{64}$/.test(hash)) ||
+      configuredHashes.length !== CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET.size ||
+      configuredHashes.some((hash) => !CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET.has(hash))
+    ) {
+      throw new Error("Chargebackable payment-method hashes are invalid or unknown");
+    }
+
+    const query = `
+      query TakerPlatformStatsPage(
+        $chainId: Int!
+        $paymentMethodHashes: [String!]!
+        $after: String!
+        $limit: Int!
+      ) {
+        TakerPlatformStats(
+          where: {
+            chainId: { _eq: $chainId }
+            paymentMethodHash: { _in: $paymentMethodHashes }
+            id: { _gt: $after }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          taker
+          paymentMethodHash
+          totalAmountTaken
+        }
+      }
+    `;
+
+    const rawRows: RawTakerPlatformStats[] = [];
+    let after = "";
+    for (;;) {
+      const data = await this.query<{ TakerPlatformStats: RawTakerPlatformStats[] }>(query, {
+        chainId: this.chainId,
+        paymentMethodHashes: configuredHashes,
+        after,
+        limit: PAGE_SIZE,
+      });
+      const page = data.TakerPlatformStats;
+      if (!Array.isArray(page)) {
+        throw new Error("Indexer response omitted TakerPlatformStats");
+      }
+      let previousId = after;
+      for (const row of page) {
+        if (typeof row.id !== "string" || row.id <= previousId) {
+          throw new Error("Indexer returned duplicate or non-ascending TakerPlatformStats ids");
+        }
+        previousId = row.id;
+      }
+      rawRows.push(...page);
+      if (page.length < PAGE_SIZE) break;
+      const next = page.at(-1)?.id;
+      if (!next || next <= after) {
+        throw new Error("Indexer pagination did not advance for TakerPlatformStats");
+      }
+      after = next;
+    }
+
+    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
+      throw new Error("Indexer returned duplicate TakerPlatformStats rows");
+    }
+
+    const rows = rawRows.map((row) => {
+      const taker = normalizeAddress(row.taker, "TakerPlatformStats.taker");
+      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
+      if (
+        row.chainId !== this.chainId ||
+        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
+        !paymentMethodHashes.has(paymentMethodHash)
+      ) {
+        throw new Error("Indexer returned an unexpected TakerPlatformStats row");
+      }
+      const canonicalId = `${this.chainId}_${taker}_${paymentMethodHash}`;
+      if (row.id.toLowerCase() !== canonicalId) {
+        throw new Error("Indexer returned an invalid TakerPlatformStats id");
+      }
+      if (typeof row.totalAmountTaken !== "string" || !/^\d+$/.test(row.totalAmountTaken)) {
+        throw new Error("Indexer returned invalid TakerPlatformStats.totalAmountTaken");
+      }
+      const totalAmountTaken = BigInt(row.totalAmountTaken);
+      if (totalAmountTaken < 0n) {
+        throw new Error("Indexer returned negative TakerPlatformStats.totalAmountTaken");
+      }
+      return {
+        id: canonicalId,
+        taker,
+        paymentMethodHash,
+        totalAmountTaken,
+      };
+    });
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("Indexer returned duplicate canonical TakerPlatformStats rows");
+    }
+    return rows;
   }
 }

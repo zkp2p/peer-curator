@@ -1,67 +1,43 @@
 # Validation record
 
-## Historical-only hard cut
+## Chargeback-only historical taker policy
 
-Validated 2026-07-29 with transaction execution disabled.
+Live read-only baselines captured on 2026-07-30 with transaction execution
+disabled and no wallet addresses logged.
 
-- `pnpm check`: 11 test files and 76 tests passed; lint, typecheck, and build passed.
-- `pnpm test:coverage`: passed with 72.5% statement coverage.
-- `pnpm check:upstream`: contracts, historical `TakerStats`, current membership projection,
-  handler, and both registry bindings are compatible.
-- Live preproduction-indexer calculation returned only `historical-taker`: 10,106 source rows;
-  1,715 Peer, 855 Plus, and 210 Pro cumulative memberships.
-- No Current-Earn aggregate was queried or calculated.
+The legacy production calculation reproduced the expected cumulative
+membership counts of 1,717 Peer, 860 Plus, and 210 Pro from 10,132
+`TakerStats` rows. The chargeback-only calculation read 4,443 PayPal, Venmo,
+and Cash App `TakerPlatformStats` rows across 3,894 wallets and produced:
 
-## Prior validation
-
-Validated 2026-07-24 with transaction execution disabled.
-
-## Production calculation
-
-Inputs:
-
-- Production indexer through both authenticated and public access paths.
-- Twenty-five committed blocked-wallet hashes; no Curator/database request.
-- No address-specific tier overrides.
-
-Results:
-
-| Scope | Source rows | Peer | Plus | Pro | Total |
+| Environment | Qualifying platform rows | Peer | Plus | Pro | Total memberships |
 |---|---:|---:|---:|---:|---:|
-| Historical taker, recalculated against current lifetime stats | 9,998 | 854 | 635 | 210 | 1,699 |
+| Production | 4,443 | 451 | 246 | 81 | 778 |
+| Staging | 13 | 0 | 0 | 0 | 0 |
 
-The API-key and paced public modes produced identical membership counts. The
-keyed mode sent `x-api-key`; the public mode omitted it and enforced a local
-650 ms request interval.
+The production change from the legacy baseline is intentional and matches the
+prior chargeback-volume evidence exactly. Staging indexes its own staging
+contract history rather than production history; its 29 total takers include
+10 wallets on chargebackable platforms, none above the $500 entry threshold.
 
-The calculation was rerun after the indexer-backed membership refactor and
-returned the same source rows and all three tier counts.
+The policy:
 
-The blocklist contains 25 wallet hashes. A positive lookup was checked against
-the source snapshot without logging or persisting the wallet. No credential or
-member address was written or logged.
+- consumes the canonical PayPal, Venmo, and Cash App hashes from
+  `@zkp2p/contracts-v2/paymentMethods/lookups.json`;
+- cross-checks those mappings against their canonical keccak hashes and reverse
+  lookups at startup;
+- paginates `TakerPlatformStats` by stable `id`, rejects duplicates and
+  malformed rows, and sums multiple qualifying platform rows once per wallet;
+- gives all other platforms zero qualification volume;
+- applies the 25-entry committed blocked-wallet hash snapshot;
+- preserves `Pro ⊆ Plus ⊆ Peer`;
+- does not select `TakerStats.totalFulfilledVolume`, cancellation volume, or
+  lock-score data;
+- does not calculate Current-Earn tiers or apply address-specific overrides.
 
-The historical counts are expected to exceed the June 18 seed snapshot because
-this service continuously recalculates against current lifetime taker activity.
+## Required commands
 
-## Local seed comparison
-
-`pnpm compare:local` compared the current calculation with the earlier
-`group-seeds` artifacts without printing member addresses.
-
-| Scope | Local | Current | Overlap | Current only | Local only |
-|---|---:|---:|---:|---:|---:|
-| Historical taker | 1,596 | 1,699 | 1,589 | 110 | 7 |
-
-All seven historical local-only wallets still have current TakerStats rows and
-are not blocked. Their current lock-score penalty demotes them to Peasant.
-Among the 1,589 overlapping wallets, 45 changed exact tier as lifetime activity
-and lock score evolved. The remaining current-only growth is expected because
-the local historical artifact was a 2026-06-18 snapshot.
-
-## Commands
-
-Passed:
+Run before PR handoff:
 
 ```text
 pnpm lint
@@ -69,22 +45,13 @@ pnpm typecheck
 pnpm test
 pnpm test:coverage
 pnpm build
-pnpm calculate
-pnpm verify -- 0x...
-pnpm compare:local -- /path/to/group-seeds
-Node 22 local: typecheck, 22 tests, coverage, build
+WORKSPACE_ROOT=/path/to/workspace pnpm check:upstream
+INDEXER_GRAPHQL_URL=<staging> pnpm calculate
+INDEXER_GRAPHQL_URL=<production> pnpm calculate
+git diff --check
 ```
 
-`pnpm check:upstream` confirms the latest contracts bytes32 ABI, current
-membership schema and handler, and the staging registry source binding. It
-currently exits nonzero for two explicit rollout gates: the tier aggregate
-surface is not yet restored on indexer `main`, and production has no nonzero
-registry source binding.
-
-No production on-chain plan was run because its registry and three group IDs are
-not deployed. The current-membership consumer path is covered by mocked
-GraphQL tests for group coverage, bytes32 IDs, member enumeration, and
-`memberCount` parity. Snapshot tests cover a stable lagged watermark, indexer
-movement during reads, and insufficient RPC confirmations. Staging end-to-end
-parity is recorded separately after the indexer release is deployed and
-backfilled.
+The membership path remains independently fail-closed: every configured
+`AddressGroup` must exist, its `memberCount` must equal the fully enumerated
+`AddressGroupMember` rows, the indexer watermark must remain pinned through
+the read, and RPC governance must match before a transaction can be planned.
