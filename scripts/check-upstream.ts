@@ -89,6 +89,17 @@ function checkLegacyVerifierMapping(content: string): SurfaceCheck {
         content,
       ),
   ).map(([, method]) => `reviewed V2 ${method} verifier mapping`);
+  const baseStart = content.indexOf("export const BASE_MAINNET_DEPLOYMENTS");
+  const baseEnd = content.indexOf("const BASE_MAINNET_VERIFIER_TO_METHOD_HASH");
+  const baseSection =
+    baseStart >= 0 && baseEnd > baseStart ? content.slice(baseStart, baseEnd) : "";
+  for (const method of ["paypal", "venmo", "cashapp"]) {
+    const count = [...baseSection.matchAll(new RegExp(`lookups\\.nameToHash\\.${method}`, "g"))]
+      .length;
+    if (count !== 2) {
+      missing.push(`exactly two Base V2 ${method} verifier mappings`);
+    }
+  }
   return {
     producer: "zkp2p-indexer",
     ref: "origin/main",
