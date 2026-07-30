@@ -679,6 +679,16 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(5);
+    const depositRequest = fetchMock.mock.calls
+      .map(
+        (call) =>
+          JSON.parse(String((call[1] as RequestInit).body)) as {
+            query: string;
+            variables: Record<string, unknown>;
+          },
+      )
+      .find((request) => request.query.includes("DepositMakerPage"));
+    expect(depositRequest?.variables.ids).toEqual([`${V2_HISTORY_ESCROW_BY_ENVIRONMENT.prod}_1`]);
     expect(snapshot.makerPlatformStats).toEqual([
       expect.objectContaining({
         maker: "0x7777777777777777777777777777777777777777",

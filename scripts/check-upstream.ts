@@ -151,6 +151,31 @@ function checkLegacyVerifierMapping(content: string): SurfaceCheck {
   };
 }
 
+function checkDepositIdHelpers(content: string): SurfaceCheck {
+  const missing: string[] = [];
+  if (
+    !/export const buildDepositId[\s\S]*?return `\$\{escrow \?\? "unknown"\}_\$\{depositId\.toString\(\)\}`;/.test(
+      content,
+    )
+  ) {
+    missing.push("V2 Deposit id is escrow_depositId");
+  }
+  if (
+    !/export const buildV21DepositId[\s\S]*?return `\$\{escrow\}_\$\{depositId\.toString\(\)\}`;/.test(
+      content,
+    )
+  ) {
+    missing.push("unified Deposit id is escrow_depositId");
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "Deposit id helpers",
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
+  };
+}
+
 function checkV2SourceBinding(input: {
   environment: V2HistoryEnvironment;
   config: string;
@@ -227,6 +252,17 @@ const mainIndexerIntentHandlers = [
   show(indexerRepo, "origin/main", "src/handlers/v3/orchestrator_v3.ts"),
 ].join("\n");
 const mainIndexerPaymentMethods = show(indexerRepo, "origin/main", "src/utils/paymentMethods.ts");
+const mainDepositIdHelpers = show(indexerRepo, "origin/main", "src/utils/helpers.ts");
+const mainV2DepositProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/v2/depositHandlers.ts",
+);
+const mainUnifiedDepositProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/v21/escrow_deposit.ts",
+);
 const mainTakerPlatformStatsProducer = [
   show(indexerRepo, "origin/main", "src/services/takerPlatformStats.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v2/taker_stats.ts"),
@@ -410,6 +446,34 @@ const runtimeChecks = [
   }),
   ...blockPinnedGraphqlChecks,
   ...aggregateGraphqlChecks,
+  checkDepositIdHelpers(mainDepositIdHelpers),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "V2 Deposit maker binding producer",
+    content: mainV2DepositProducer,
+    required: [
+      "const depositId = buildDepositId(event.chainId, event.params.depositId);",
+      "id: depositId,",
+      "escrowAddress: getV2EscrowAddress(event.chainId)!,",
+      "depositor: event.params.depositor,",
+      "context.Deposit.set(deposit);",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "unified Deposit maker binding producer",
+    content: mainUnifiedDepositProducer,
+    required: [
+      "buildV21DepositId(",
+      "const depositId = buildDepositId(event, options);",
+      "id: depositId,",
+      'escrowAddress: escrowAddress ?? "unknown",',
+      "depositor: event.params.depositor,",
+      "context.Deposit.set(deposit);",
+    ],
+  }),
   check({
     producer: "zkp2p-indexer",
     ref: "origin/main",

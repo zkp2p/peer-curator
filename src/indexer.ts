@@ -122,6 +122,8 @@ const MAX_V2_SIGNAL_ROWS = 25_000;
 const MAX_V2_FULFILLMENT_ROWS = 25_000;
 const MAX_UNIFIED_SIGNAL_ROWS = 100_000;
 const MAX_UNIFIED_FULFILLMENT_ROWS = 100_000;
+const MAX_DEPOSIT_BINDING_ROWS = 25_000;
+const DEPOSIT_BINDING_BATCH_SIZE = 500;
 const MAX_GROUP_EVENT_ROWS = 10_000;
 const MAX_RETRIES = 5;
 const PUBLIC_REQUEST_INTERVAL_MS = 650;
@@ -630,13 +632,18 @@ export class IndexerClient {
     return rows;
   }
 
-  private async getDepositMakerRows(): Promise<RawDepositMaker[]> {
+  private async getDepositMakerRows(depositIds: ReadonlySet<string>): Promise<RawDepositMaker[]> {
+    const requestedIds = [...new Set([...depositIds].map((id) => id.toLowerCase()))].sort();
+    if (requestedIds.length > MAX_DEPOSIT_BINDING_ROWS) {
+      throw new Error("Referenced Deposit bindings exceed the block-snapshot safety limit");
+    }
+    if (requestedIds.length === 0) return [];
     const query = `
-      query DepositMakerPage($chainId: Int!, $after: String!, $limit: Int!) {
+      query DepositMakerPage($chainId: Int!, $ids: [String!]!, $limit: Int!) {
         Deposit(
           where: {
             chainId: { _eq: $chainId }
-            id: { _gt: $after }
+            id: { _in: $ids }
           }
           order_by: { id: asc }
           limit: $limit
@@ -650,29 +657,40 @@ export class IndexerClient {
       }
     `;
     const rows: RawDepositMaker[] = [];
-    let after = "";
-    for (;;) {
+    const seenIds = new Set<string>();
+    for (let offset = 0; offset < requestedIds.length; offset += DEPOSIT_BINDING_BATCH_SIZE) {
+      const ids = requestedIds.slice(offset, offset + DEPOSIT_BINDING_BATCH_SIZE);
+      const requestedBatch = new Set(ids);
       const data = await this.query<{ Deposit: RawDepositMaker[] }>(query, {
         chainId: this.chainId,
-        after,
-        limit: PAGE_SIZE,
+        ids,
+        limit: ids.length,
       });
       const page = data.Deposit;
       if (!Array.isArray(page)) throw new Error("Indexer response omitted Deposit");
-      let previousId = after;
+      if (page.length > ids.length) {
+        throw new Error("Indexer returned too many Deposit bindings");
+      }
+      let previousId = "";
       for (const row of page) {
-        if (typeof row.id !== "string" || row.id <= previousId) {
-          throw new Error("Indexer returned duplicate or non-ascending Deposit ids");
+        const normalizedId = typeof row.id === "string" ? row.id.toLowerCase() : "";
+        const normalizedEscrow =
+          typeof row.escrowAddress === "string" ? row.escrowAddress.toLowerCase() : "";
+        const expectedId = `${normalizedEscrow}_${row.depositId}`;
+        if (
+          normalizedId.length === 0 ||
+          normalizedId <= previousId ||
+          !requestedBatch.has(normalizedId) ||
+          seenIds.has(normalizedId) ||
+          row.chainId !== this.chainId ||
+          normalizedId !== expectedId
+        ) {
+          throw new Error("Indexer returned an invalid Deposit maker binding");
         }
-        previousId = row.id;
+        previousId = normalizedId;
+        seenIds.add(normalizedId);
       }
       rows.push(...page);
-      if (page.length < PAGE_SIZE) break;
-      const next = page.at(-1)?.id;
-      if (!next || next <= after) {
-        throw new Error("Indexer pagination did not advance for Deposit");
-      }
-      after = next;
     }
     return rows;
   }
@@ -681,34 +699,42 @@ export class IndexerClient {
     snapshotBlock: bigint;
     v2Environment: V2HistoryEnvironment;
   }): Promise<BlockPinnedMerchantSnapshot> {
-    const [deposits, v2Signals, v2Fulfillments, unifiedSignals, unifiedFulfillments] =
-      await Promise.all([
-        this.getDepositMakerRows(),
-        this.getPinnedEventRows<RawV2MerchantIntentSignaled>({
-          root: "Escrow_V2_IntentSignaled",
-          selection: "id intentHash depositId verifier amount",
-          snapshotBlock: input.snapshotBlock,
-          maximumRows: MAX_V2_SIGNAL_ROWS,
-        }),
-        this.getPinnedEventRows<RawV2MerchantIntentFulfilled>({
-          root: "Escrow_V2_IntentFulfilled",
-          selection: "id intentHash depositId verifier amount",
-          snapshotBlock: input.snapshotBlock,
-          maximumRows: MAX_V2_FULFILLMENT_ROWS,
-        }),
-        this.getPinnedEventRows<RawUnifiedMerchantIntentSignaled>({
-          root: "Orchestrator_V21_IntentSignaled",
-          selection: "id intentHash escrow depositId paymentMethod",
-          snapshotBlock: input.snapshotBlock,
-          maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
-        }),
-        this.getPinnedEventRows<RawUnifiedMerchantIntentFulfilled>({
-          root: "Orchestrator_V21_IntentFulfilled",
-          selection: "id intentHash amount isManualRelease",
-          snapshotBlock: input.snapshotBlock,
-          maximumRows: MAX_UNIFIED_FULFILLMENT_ROWS,
-        }),
-      ]);
+    const [v2Signals, v2Fulfillments, unifiedSignals, unifiedFulfillments] = await Promise.all([
+      this.getPinnedEventRows<RawV2MerchantIntentSignaled>({
+        root: "Escrow_V2_IntentSignaled",
+        selection: "id intentHash depositId verifier amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_SIGNAL_ROWS,
+      }),
+      this.getPinnedEventRows<RawV2MerchantIntentFulfilled>({
+        root: "Escrow_V2_IntentFulfilled",
+        selection: "id intentHash depositId verifier amount",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_V2_FULFILLMENT_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedMerchantIntentSignaled>({
+        root: "Orchestrator_V21_IntentSignaled",
+        selection: "id intentHash escrow depositId paymentMethod",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_SIGNAL_ROWS,
+      }),
+      this.getPinnedEventRows<RawUnifiedMerchantIntentFulfilled>({
+        root: "Orchestrator_V21_IntentFulfilled",
+        selection: "id intentHash amount isManualRelease",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_UNIFIED_FULFILLMENT_ROWS,
+      }),
+    ]);
+    const referencedDepositIds = new Set<string>();
+    for (const row of v2Signals) {
+      referencedDepositIds.add(
+        `${V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.v2Environment]}_${row.depositId}`,
+      );
+    }
+    for (const row of unifiedSignals) {
+      referencedDepositIds.add(`${row.escrow.toLowerCase()}_${row.depositId}`);
+    }
+    const deposits = await this.getDepositMakerRows(referencedDepositIds);
     const makerPlatformStats = reconstructMerchantPlatformRows({
       chainId: this.chainId,
       snapshotBlock: input.snapshotBlock,
@@ -719,23 +745,11 @@ export class IndexerClient {
       unifiedSignals,
       unifiedFulfillments,
     });
-    const referencedDepositIds = new Set<string>();
-    for (const row of v2Signals) {
-      referencedDepositIds.add(
-        `${V2_HISTORY_ESCROW_BY_ENVIRONMENT[input.v2Environment]}_${row.depositId}`,
-      );
-    }
-    for (const row of unifiedSignals) {
-      referencedDepositIds.add(`${row.escrow.toLowerCase()}_${row.depositId}`);
-    }
-    const referencedDeposits = deposits.filter((row) =>
-      referencedDepositIds.has(row.id.toLowerCase()),
-    );
     const evidenceDigest = `0x${createHash("sha256")
       .update(
         JSON.stringify({
           snapshotBlock: input.snapshotBlock.toString(),
-          referencedDeposits,
+          referencedDeposits: deposits,
           v2Signals,
           v2Fulfillments,
           unifiedSignals,
