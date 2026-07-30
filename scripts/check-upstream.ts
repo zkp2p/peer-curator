@@ -176,6 +176,38 @@ function checkDepositIdHelpers(content: string): SurfaceCheck {
   };
 }
 
+function checkManualReleaseEventDerivation(content: string): SurfaceCheck {
+  const handlerStart = content.indexOf("export async function onOrchestratorIntentFulfilled");
+  const handlerEnd = content.indexOf(
+    "export async function onOrchestratorIntentPruned",
+    handlerStart,
+  );
+  const handler =
+    handlerStart >= 0 && handlerEnd > handlerStart ? content.slice(handlerStart, handlerEnd) : "";
+  const missing: string[] = [];
+  if (
+    !/const audit = \{[\s\S]*?isManualRelease:\s*event\.params\.isManualRelease,[\s\S]*?context\.Orchestrator_V21_IntentFulfilled\.set\(audit\);/.test(
+      handler,
+    )
+  ) {
+    missing.push("fulfillment audit derives isManualRelease directly from the contract event");
+  }
+  if (
+    !/recordMakerFill\([\s\S]*?BigInt\(event\.params\.amount\),\s*event\.params\.isManualRelease,/.test(
+      handler,
+    )
+  ) {
+    missing.push("maker aggregate receives the same contract-event manual-release flag");
+  }
+  return {
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "unified manual-release event derivation",
+    status: missing.length === 0 ? "compatible" : "incompatible",
+    missing,
+  };
+}
+
 function checkV2SourceBinding(input: {
   environment: V2HistoryEnvironment;
   config: string;
@@ -242,9 +274,14 @@ const mainIndexerEventSchema = [
   show(indexerRepo, "origin/main", "schema/events_v21.graphql"),
   show(indexerRepo, "origin/main", "schema/events_v3.graphql"),
 ].join("\n");
+const mainUnifiedIntentProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/v21/orchestrator_intents.ts",
+);
 const mainIndexerIntentHandlers = [
   show(indexerRepo, "origin/main", "src/handlers/v2/intentHandlers.ts"),
-  show(indexerRepo, "origin/main", "src/handlers/v21/orchestrator_intents.ts"),
+  mainUnifiedIntentProducer,
   show(indexerRepo, "origin/main", "src/handlers/v22/EventHandler_v22.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v3/orchestrator_v3.ts"),
 ].join("\n");
@@ -518,6 +555,7 @@ const runtimeChecks = [
       "onOrchestratorIntentFulfilled(",
     ],
   }),
+  checkManualReleaseEventDerivation(mainUnifiedIntentProducer),
   checkLegacyVerifierMapping(mainIndexerPaymentMethods),
   checkV2SourceBinding({
     environment: "staging",
