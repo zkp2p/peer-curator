@@ -191,6 +191,11 @@ const mainTakerPlatformStatsProducer = [
   show(indexerRepo, "origin/main", "src/handlers/v2/taker_stats.ts"),
   show(indexerRepo, "origin/main", "src/handlers/v21/taker_stats.ts"),
 ].join("\n");
+const mainMakerPlatformStatsProducer = show(
+  indexerRepo,
+  "origin/main",
+  "src/handlers/makerStats.ts",
+);
 const mainIndexerProductionConfig = show(indexerRepo, "origin/main", "config.base_prod.yaml");
 const mainIndexerStagingConfig = show(indexerRepo, "origin/main", "config.base_staging.yaml");
 const mainAddressGroupHandler = show(
@@ -212,6 +217,20 @@ const runtimeChecks = [
       "event MemberRemoved",
       "function getGroup",
       "bytes32 _groupId",
+    ],
+  }),
+  check({
+    producer: "zkp2p-indexer",
+    ref: "origin/main",
+    surface: "maker chargeback volume aggregate",
+    content: `${mainIndexerSchema}\n${mainMakerPlatformStatsProducer}`,
+    required: [
+      "type MakerPlatformStats",
+      "nonManualReleaseVolume: BigInt!",
+      "manualReleaseVolume: BigInt!",
+      "nonManualReleaseVolume:",
+      "manualReleaseVolume:",
+      "manualReleaseDelta === 0",
     ],
   }),
   check({

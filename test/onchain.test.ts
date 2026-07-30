@@ -1,8 +1,10 @@
-import type { Address } from "viem";
+import { type Address, encodeAbiParameters, encodeEventTopics } from "viem";
 import { describe, expect, it, vi } from "vitest";
+import { addressGroupRegistryAbi } from "../src/contracts.js";
 import { type GroupsConfig, normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import {
   assertRegistryGovernance,
+  createCuratedGroup,
   executeMutations,
   type GroupGovernance,
   loadRegistryGovernance,
@@ -13,6 +15,51 @@ import { addr, groupId } from "./fixtures.js";
 
 const member = (digit: string): Address => normalizeAddress(`0x${digit.repeat(40)}`);
 const configuredGroupId = normalizeGroupId(`0x${"11".repeat(32)}`);
+
+describe("createCuratedGroup", () => {
+  it("returns the confirmed GroupCreated identity", async () => {
+    const registryAddress = member("9");
+    const curator = member("8");
+    const name = "Top Chargeback Merchants";
+    const groupId = configuredGroupId;
+    const topics = encodeEventTopics({
+      abi: addressGroupRegistryAbi,
+      eventName: "GroupCreated",
+      args: { groupId, curator },
+    });
+    const publicClient = {
+      simulateContract: vi.fn().mockResolvedValue({ request: { functionName: "createGroup" } }),
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({
+        status: "success",
+        blockNumber: 123n,
+        logs: [
+          {
+            address: registryAddress,
+            topics,
+            data: encodeAbiParameters([{ type: "string" }], [name]),
+          },
+        ],
+      }),
+    };
+    const walletClient = {
+      writeContract: vi.fn().mockResolvedValue(`0x${"aa".repeat(32)}`),
+    };
+
+    await expect(
+      createCuratedGroup({
+        publicClient: publicClient as never,
+        walletClient: walletClient as never,
+        account: { address: curator } as never,
+        registryAddress,
+        name,
+      }),
+    ).resolves.toEqual({
+      groupId,
+      transactionHash: `0x${"aa".repeat(32)}`,
+      blockNumber: 123n,
+    });
+  });
+});
 
 describe("loadRegistryState", () => {
   it("loads governance at the pinned block without scanning RPC logs", async () => {

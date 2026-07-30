@@ -6,10 +6,10 @@ import type {
   Transport,
   WalletClient,
 } from "viem";
-import { zeroAddress } from "viem";
+import { parseEventLogs, zeroAddress } from "viem";
 import { base } from "viem/chains";
 import { addressGroupRegistryAbi } from "./contracts.js";
-import { type GroupId, type GroupsConfig, normalizeAddress } from "./domain.js";
+import { type GroupId, type GroupsConfig, normalizeAddress, normalizeGroupId } from "./domain.js";
 import type { IndexedMembershipSnapshot } from "./indexer.js";
 
 export interface GroupGovernance {
@@ -32,6 +32,52 @@ export interface GroupMutation {
   operation: "add" | "remove";
   groupId: GroupId;
   members: Address[];
+}
+
+export async function createCuratedGroup<
+  publicTransport extends Transport,
+  walletTransport extends Transport,
+>(input: {
+  publicClient: PublicClient<publicTransport, typeof base>;
+  walletClient: WalletClient<walletTransport, typeof base, PrivateKeyAccount>;
+  account: PrivateKeyAccount;
+  registryAddress: Address;
+  name: string;
+}): Promise<{ groupId: GroupId; transactionHash: `0x${string}`; blockNumber: bigint }> {
+  const simulation = await input.publicClient.simulateContract({
+    account: input.account,
+    address: input.registryAddress,
+    abi: addressGroupRegistryAbi,
+    functionName: "createGroup",
+    args: [input.name],
+  });
+  const transactionHash = await input.walletClient.writeContract(simulation.request);
+  const receipt = await input.publicClient.waitForTransactionReceipt({
+    hash: transactionHash,
+    confirmations: 1,
+  });
+  if (receipt.status !== "success") {
+    throw new Error(`Registry group creation reverted: ${transactionHash}`);
+  }
+  const created = parseEventLogs({
+    abi: addressGroupRegistryAbi,
+    eventName: "GroupCreated",
+    logs: receipt.logs,
+    strict: true,
+  }).filter(
+    (log) =>
+      log.address.toLowerCase() === input.registryAddress.toLowerCase() &&
+      log.args.curator.toLowerCase() === input.account.address.toLowerCase() &&
+      log.args.name === input.name,
+  );
+  if (created.length !== 1 || !created[0]) {
+    throw new Error("Group creation receipt did not contain one matching GroupCreated event");
+  }
+  return {
+    groupId: normalizeGroupId(created[0].args.groupId),
+    transactionHash,
+    blockNumber: receipt.blockNumber,
+  };
 }
 
 export async function loadRegistryGovernance<transport extends Transport>(

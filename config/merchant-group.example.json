@@ -1,0 +1,8 @@
+{
+  "chainId": 8453,
+  "registryAddress": "0x1111111111111111111111111111111111111111",
+  "registryDeploymentBlock": "1",
+  "groupId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "minimumMembers": 1,
+  "maximumMembers": 500
+}

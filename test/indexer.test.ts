@@ -273,6 +273,79 @@ describe("IndexerClient taker-platform pagination and validation", () => {
   });
 });
 
+describe("IndexerClient maker-platform volume split", () => {
+  function makerRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: `8453_${taker}_${paypalHash}`,
+      chainId: 8453,
+      maker: taker,
+      paymentMethodHash: paypalHash,
+      totalAmountTaken: "150",
+      nonManualReleaseVolume: "100",
+      manualReleaseVolume: "50",
+      ...overrides,
+    };
+  }
+
+  it("reads all three maker volume fields and validates their invariant", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { MakerPlatformStats: [makerRow()] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const rows = await client.getMakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET);
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        maker: taker,
+        totalAmountTaken: 150n,
+        nonManualReleaseVolume: 100n,
+        manualReleaseVolume: 50n,
+      }),
+    ]);
+  });
+
+  it("fails closed when the split does not equal the total", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            data: {
+              MakerPlatformStats: [makerRow({ nonManualReleaseVolume: "99" })],
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    await expect(
+      client.getMakerPlatformStats(CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET),
+    ).rejects.toThrow("volume split does not equal");
+  });
+});
+
 describe("IndexerClient address-group membership", () => {
   const registryAddress = normalizeAddress("0x9999999999999999999999999999999999999999");
   const firstMember = "0x1111111111111111111111111111111111111111";
@@ -535,6 +608,27 @@ describe("IndexerClient block-pinned reconciliation snapshot", () => {
       expect(request.query).toContain("id: { _gt: $after, _lte: $through }");
       expect(request.variables.through).toBe("8453_49000000_999999999");
     }
+    expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("reconstructs a membership-only snapshot from immutable group events", async () => {
+    const fetchMock = pinnedFetch();
+    const client = new IndexerClient(
+      "https://indexer.example/graphql",
+      "test-api-key",
+      8453,
+      1_000,
+    );
+
+    const snapshot = await client.getBlockPinnedMembershipSnapshot({
+      registryAddress,
+      groupIds: [groupId],
+      deploymentBlock: 48_000_000n,
+      snapshotBlock,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(snapshot.membership.membersByGroupId.get(groupId)).toEqual(new Set([member]));
     expect(snapshot.evidenceDigest).toMatch(/^0x[0-9a-f]{64}$/);
   });
 

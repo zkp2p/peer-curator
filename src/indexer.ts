@@ -22,6 +22,15 @@ export interface TakerPlatformStatsRow {
   totalAmountTaken: bigint;
 }
 
+export interface MakerPlatformStatsRow {
+  id: string;
+  maker: Address;
+  paymentMethodHash: Hex;
+  totalAmountTaken: bigint;
+  nonManualReleaseVolume: bigint;
+  manualReleaseVolume: bigint;
+}
+
 export interface IndexedMembershipSnapshot {
   membersByGroupId: Map<GroupId, Set<Address>>;
   snapshotBlock: bigint;
@@ -30,6 +39,11 @@ export interface IndexedMembershipSnapshot {
 
 export interface BlockPinnedReconciliationSnapshot {
   takerPlatformStats: TakerPlatformStatsRow[];
+  membership: IndexedMembershipSnapshot;
+  evidenceDigest: Hex;
+}
+
+export interface BlockPinnedMembershipSnapshot {
   membership: IndexedMembershipSnapshot;
   evidenceDigest: Hex;
 }
@@ -49,6 +63,16 @@ interface RawTakerPlatformStats {
   taker: string;
   paymentMethodHash: string;
   totalAmountTaken: string;
+}
+
+interface RawMakerPlatformStats {
+  id: string;
+  chainId: number;
+  maker: string;
+  paymentMethodHash: string;
+  totalAmountTaken: string;
+  nonManualReleaseVolume: string;
+  manualReleaseVolume: string;
 }
 
 interface RawAddressGroup {
@@ -593,6 +617,82 @@ export class IndexerClient {
     return rows;
   }
 
+  public async getBlockPinnedMembershipSnapshot(input: {
+    registryAddress: Address;
+    groupIds: GroupId[];
+    deploymentBlock: bigint;
+    snapshotBlock: bigint;
+  }): Promise<BlockPinnedMembershipSnapshot> {
+    const uniqueGroupIds = [...new Set(input.groupIds)];
+    if (uniqueGroupIds.length === 0 || uniqueGroupIds.length !== input.groupIds.length) {
+      throw new Error("Address group ids must be non-empty and unique");
+    }
+    if (input.deploymentBlock > input.snapshotBlock) {
+      throw new Error("Registry deployment block is greater than the requested snapshot");
+    }
+    const [creations, additions, removals, groupBindings] = await Promise.all([
+      this.getPinnedEventRows<RawGroupCreatedEvent>({
+        root: "AddressGroupRegistry_GroupCreated",
+        selection: "id groupId",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: uniqueGroupIds.length,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberAdded",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getPinnedEventRows<RawMemberEvent>({
+        root: "AddressGroupRegistry_MemberRemoved",
+        selection: "id groupId member",
+        snapshotBlock: input.snapshotBlock,
+        maximumRows: MAX_GROUP_EVENT_ROWS,
+        additionalWhere: "groupId: { _in: $groupIds }",
+        variableDefinitions: "$groupIds: [String!]!",
+        variables: { groupIds: uniqueGroupIds },
+      }),
+      this.getGroupBindingRows(uniqueGroupIds),
+    ]);
+    this.assertGroupRegistryBinding({
+      registryAddress: input.registryAddress,
+      groupIds: uniqueGroupIds,
+      rows: groupBindings,
+    });
+    const evidenceDigest = `0x${createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshotBlock: input.snapshotBlock.toString(),
+          creations,
+          additions,
+          removals,
+          groupBindings,
+        }),
+      )
+      .digest("hex")}` as Hex;
+    return {
+      evidenceDigest,
+      membership: {
+        membersByGroupId: reconstructMembership({
+          chainId: this.chainId,
+          snapshotBlock: input.snapshotBlock,
+          groupIds: uniqueGroupIds,
+          creations,
+          additions,
+          removals,
+        }),
+        snapshotBlock: input.snapshotBlock,
+        indexedThroughBlock: input.snapshotBlock,
+      },
+    };
+  }
+
   /**
    * Reconstructs policy volume and group membership only from immutable event
    * rows whose event ids are bounded by one explicit finalized Base block.
@@ -787,5 +887,113 @@ export class IndexerClient {
     }
 
     return this.parseTakerPlatformStatsRows(rawRows, paymentMethodHashes);
+  }
+
+  public async getMakerPlatformStats(
+    paymentMethodHashes: ReadonlySet<Hex>,
+  ): Promise<MakerPlatformStatsRow[]> {
+    const configuredHashes = this.validatePaymentMethodHashes(paymentMethodHashes);
+    const query = `
+      query MakerPlatformStatsPage(
+        $chainId: Int!
+        $paymentMethodHashes: [String!]!
+        $after: String!
+        $limit: Int!
+      ) {
+        MakerPlatformStats(
+          where: {
+            chainId: { _eq: $chainId }
+            paymentMethodHash: { _in: $paymentMethodHashes }
+            id: { _gt: $after }
+          }
+          order_by: { id: asc }
+          limit: $limit
+        ) {
+          id
+          chainId
+          maker
+          paymentMethodHash
+          totalAmountTaken
+          nonManualReleaseVolume
+          manualReleaseVolume
+        }
+      }
+    `;
+
+    const rawRows: RawMakerPlatformStats[] = [];
+    let after = "";
+    for (;;) {
+      const data = await this.query<{ MakerPlatformStats: RawMakerPlatformStats[] }>(query, {
+        chainId: this.chainId,
+        paymentMethodHashes: configuredHashes,
+        after,
+        limit: PAGE_SIZE,
+      });
+      const page = data.MakerPlatformStats;
+      if (!Array.isArray(page)) {
+        throw new Error("Indexer response omitted MakerPlatformStats");
+      }
+      let previousId = after;
+      for (const row of page) {
+        if (typeof row.id !== "string" || row.id <= previousId) {
+          throw new Error("Indexer returned duplicate or non-ascending MakerPlatformStats ids");
+        }
+        previousId = row.id;
+      }
+      rawRows.push(...page);
+      if (page.length < PAGE_SIZE) break;
+      const next = page.at(-1)?.id;
+      if (!next || next <= after) {
+        throw new Error("Indexer pagination did not advance for MakerPlatformStats");
+      }
+      after = next;
+    }
+
+    if (new Set(rawRows.map((row) => row.id)).size !== rawRows.length) {
+      throw new Error("Indexer returned duplicate MakerPlatformStats rows");
+    }
+    const rows = rawRows.map((row): MakerPlatformStatsRow => {
+      const maker = normalizeAddress(row.maker, "MakerPlatformStats.maker");
+      const paymentMethodHash = row.paymentMethodHash?.toLowerCase() as Hex;
+      if (
+        row.chainId !== this.chainId ||
+        !/^0x[0-9a-f]{64}$/.test(paymentMethodHash) ||
+        !paymentMethodHashes.has(paymentMethodHash)
+      ) {
+        throw new Error("Indexer returned an unexpected MakerPlatformStats row");
+      }
+      const canonicalId = `${this.chainId}_${maker}_${paymentMethodHash}`;
+      if (row.id.toLowerCase() !== canonicalId) {
+        throw new Error("Indexer returned an invalid MakerPlatformStats id");
+      }
+      const amounts = [
+        ["totalAmountTaken", row.totalAmountTaken],
+        ["nonManualReleaseVolume", row.nonManualReleaseVolume],
+        ["manualReleaseVolume", row.manualReleaseVolume],
+      ] as const;
+      for (const [field, value] of amounts) {
+        if (typeof value !== "string" || !/^\d+$/.test(value)) {
+          throw new Error(`Indexer returned invalid MakerPlatformStats.${field}`);
+        }
+      }
+      const totalAmountTaken = BigInt(row.totalAmountTaken);
+      const nonManualReleaseVolume = BigInt(row.nonManualReleaseVolume);
+      const manualReleaseVolume = BigInt(row.manualReleaseVolume);
+      if (totalAmountTaken !== nonManualReleaseVolume + manualReleaseVolume) {
+        throw new Error("Indexer MakerPlatformStats volume split does not equal totalAmountTaken");
+      }
+      return {
+        id: canonicalId,
+        maker,
+        paymentMethodHash,
+        totalAmountTaken,
+        nonManualReleaseVolume,
+        manualReleaseVolume,
+      };
+    });
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("Indexer returned duplicate canonical MakerPlatformStats rows");
+    }
+    return rows;
   }
 }
