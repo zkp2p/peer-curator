@@ -36,6 +36,7 @@ For `plan` and `sync`, the reconciler:
 - performs two complete reconstructions, with a covering watermark after each,
   and requires byte-identical full event-evidence digests;
 - reads bytecode and `getGroup` at that exact block.
+- revalidates `getGroup` at the current RPC head immediately before execution.
 
 This accepts an indexer behind the RPC head and remains consistent while its
 watermark advances because rows at or below the chosen finalized block are

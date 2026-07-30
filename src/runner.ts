@@ -6,7 +6,12 @@ import type { RuntimeSettings } from "./config.js";
 import { normalizeAddress, tierCounts, tierForAddress } from "./domain.js";
 import { type BlockPinnedReconciliationSnapshot, IndexerClient } from "./indexer.js";
 import type { Logger } from "./logger.js";
-import { assertRegistryGovernance, executeMutations, loadRegistryState } from "./onchain.js";
+import {
+  assertRegistryGovernance,
+  executeMutations,
+  loadRegistryGovernance,
+  loadRegistryState,
+} from "./onchain.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 import { findCurrentCascadeViolations, mutationsForPhase, selectPhase } from "./phases.js";
 import {
@@ -264,6 +269,26 @@ export async function run(
   if (!account || !settings.groupAdminPrivateKey) {
     throw new Error("Execution account is unavailable");
   }
+  const executionGovernanceBlock = await publicClient.getBlockNumber();
+  const executionGovernanceByGroupId = await loadRegistryGovernance(
+    publicClient,
+    groups,
+    executionGovernanceBlock,
+  );
+  assertRegistryGovernance({
+    config: groups,
+    state: {
+      ...onchain,
+      governanceByGroupId: executionGovernanceByGroupId,
+      snapshotBlock: executionGovernanceBlock,
+    },
+    requireZeroResolver: settings.requireZeroResolver,
+    signer: account,
+  });
+  logger.info(
+    { executionGovernanceBlock: executionGovernanceBlock.toString() },
+    "Current registry governance revalidated for execution",
+  );
 
   const walletClient = createWalletClient({
     account,

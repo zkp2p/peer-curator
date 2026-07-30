@@ -150,4 +150,23 @@ describe("block-pinned event reconstruction", () => {
       }),
     ).toThrow("removal for an inactive member");
   });
+
+  it("fails closed on membership events before group creation", () => {
+    expect(() =>
+      reconstructMembership({
+        chainId,
+        snapshotBlock,
+        groupIds: [groupId],
+        creations: [{ id: eventId(2), groupId }],
+        additions: [
+          {
+            id: eventId(1),
+            groupId,
+            member: "0x5555555555555555555555555555555555555555",
+          },
+        ],
+        removals: [],
+      }),
+    ).toThrow("before group creation");
+  });
 });

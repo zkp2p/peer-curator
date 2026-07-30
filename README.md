@@ -113,6 +113,9 @@ Removing a pin returns that wallet to the calculated policy on the next sync.
   Both full evidence digests must match byte-for-byte, which detects a
   rollback/reindex that changes or temporarily omits any event page.
 - RPC bytecode and `getGroup` governance reads use that exact block.
+- Execution re-reads `getGroup` at the current RPC head immediately before
+  creating the wallet client, so a new pending transfer, curator change,
+  resolver, visibility change, or missing group aborts the write phase.
 - The Base event-id ordering window is deliberately fail-closed at blocks
   10,000,000–99,999,999; the query strategy must be reviewed before Base
   reaches the upper boundary.
@@ -263,6 +266,8 @@ For `plan` and `sync`, the service:
 5. Repeats the full reconstruction and requires identical evidence digests
    with a covering watermark after each pass.
 6. Reads bytecode and `getGroup` governance at the same block.
+7. When execution is enabled, re-reads and validates governance at the current
+   RPC head immediately before transaction simulation/submission.
 
 The indexer surface is a hard dependency. A missing event field, malformed or
 out-of-range event id, duplicate lifecycle event, impossible membership

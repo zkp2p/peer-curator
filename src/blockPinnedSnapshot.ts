@@ -304,15 +304,15 @@ export function reconstructMembership(input: {
   ensureUniqueEventIds(input.removals, input.chainId, input.snapshotBlock, "member removal");
 
   const configured = new Set(uniqueGroupIds);
-  const created = new Set<GroupId>();
+  const creationsByGroupId = new Map<GroupId, RawGroupCreatedEvent>();
   for (const row of input.creations) {
     const groupId = normalizeGroupId(row.groupId, "GroupCreated.groupId");
-    if (!configured.has(groupId) || created.has(groupId)) {
+    if (!configured.has(groupId) || creationsByGroupId.has(groupId)) {
       throw new Error("Indexer returned an unexpected or duplicate group creation");
     }
-    created.add(groupId);
+    creationsByGroupId.set(groupId, row);
   }
-  if (created.size !== configured.size) {
+  if (creationsByGroupId.size !== configured.size) {
     throw new Error("Indexer has not indexed every configured group creation");
   }
 
@@ -329,6 +329,10 @@ export function reconstructMembership(input: {
     const members = membersByGroupId.get(groupId);
     if (!members) {
       throw new Error("Indexer returned a member event for an unexpected group");
+    }
+    const creation = creationsByGroupId.get(groupId);
+    if (!creation || compareEventIds(event, creation, input.chainId, input.snapshotBlock) <= 0) {
+      throw new Error("Indexer returned a member event before group creation");
     }
     const member = normalizeAddress(event.member, "member event wallet");
     if (event.operation === "add") {

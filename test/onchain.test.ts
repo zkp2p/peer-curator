@@ -5,6 +5,7 @@ import {
   assertRegistryGovernance,
   executeMutations,
   type GroupGovernance,
+  loadRegistryGovernance,
   loadRegistryState,
   type RegistryState,
 } from "../src/onchain.js";
@@ -53,6 +54,37 @@ describe("loadRegistryState", () => {
     });
     expect(client.readContract).toHaveBeenCalledWith(
       expect.objectContaining({ functionName: "getGroup", blockNumber: 120n }),
+    );
+  });
+});
+
+describe("loadRegistryGovernance", () => {
+  it("can read current governance without reusing the plan block", async () => {
+    const registryAddress = member("9");
+    const client = {
+      readContract: vi
+        .fn()
+        .mockResolvedValue([member("8"), member("0"), member("0"), false, true] as const),
+    };
+    const config: GroupsConfig = {
+      chainId: 8453,
+      registryAddress,
+      registryDeploymentBlock: 100n,
+      groups: [
+        {
+          scope: "historical-taker",
+          tier: "PEER",
+          groupId: configuredGroupId,
+          minimumMembers: 0,
+          maximumMembers: 1_000_000,
+        },
+      ],
+    };
+
+    await loadRegistryGovernance(client as never, config);
+
+    expect(client.readContract).toHaveBeenCalledWith(
+      expect.not.objectContaining({ blockNumber: expect.anything() }),
     );
   });
 });
