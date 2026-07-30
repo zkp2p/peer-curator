@@ -211,8 +211,10 @@ const runtimeChecks = [
     surface: "AddressGroupRegistry",
     content: contractSource,
     required: [
+      "function createGroup(string calldata _name) external override returns (bytes32 groupId)",
       "function addMembers",
       "function removeMembers",
+      "event GroupCreated",
       "event MemberAdded",
       "event MemberRemoved",
       "function getGroup",

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { addressGroupRegistryAbi } from "../src/contracts.js";
 import { type GroupsConfig, normalizeAddress, normalizeGroupId } from "../src/domain.js";
 import {
+  assertMembershipEventsMatchExpected,
   assertRegistryGovernance,
   createCuratedGroup,
   executeMutations,
@@ -15,6 +16,66 @@ import { addr, groupId } from "./fixtures.js";
 
 const member = (digit: string): Address => normalizeAddress(`0x${digit.repeat(40)}`);
 const configuredGroupId = normalizeGroupId(`0x${"11".repeat(32)}`);
+
+describe("assertMembershipEventsMatchExpected", () => {
+  it("accepts only the seed additions confirmed after the approved snapshot", async () => {
+    const expectedMember = member("a");
+    const publicClient = {
+      getBlockNumber: vi.fn().mockResolvedValue(125n),
+      getLogs: vi
+        .fn()
+        .mockResolvedValueOnce([{ args: { member: expectedMember } }])
+        .mockResolvedValueOnce([]),
+    };
+
+    await expect(
+      assertMembershipEventsMatchExpected({
+        publicClient: publicClient as never,
+        registryAddress: member("9"),
+        groupId: configuredGroupId,
+        snapshotBlock: 120n,
+        expectedAddedMembers: new Set([expectedMember]),
+      }),
+    ).resolves.toBe(125n);
+    expect(publicClient.getLogs).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an unexpected addition or any removal after the snapshot", async () => {
+    const unexpectedAdditionClient = {
+      getBlockNumber: vi.fn().mockResolvedValue(125n),
+      getLogs: vi
+        .fn()
+        .mockResolvedValueOnce([{ args: { member: member("b") } }])
+        .mockResolvedValueOnce([]),
+    };
+    await expect(
+      assertMembershipEventsMatchExpected({
+        publicClient: unexpectedAdditionClient as never,
+        registryAddress: member("9"),
+        groupId: configuredGroupId,
+        snapshotBlock: 120n,
+        expectedAddedMembers: new Set(),
+      }),
+    ).rejects.toThrow("membership changed");
+
+    const removalClient = {
+      getBlockNumber: vi.fn().mockResolvedValue(125n),
+      getLogs: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ args: { member: member("a") } }]),
+    };
+    await expect(
+      assertMembershipEventsMatchExpected({
+        publicClient: removalClient as never,
+        registryAddress: member("9"),
+        groupId: configuredGroupId,
+        snapshotBlock: 120n,
+        expectedAddedMembers: new Set(),
+      }),
+    ).rejects.toThrow("membership was removed");
+  });
+});
 
 describe("createCuratedGroup", () => {
   it("returns the confirmed GroupCreated identity", async () => {
@@ -244,6 +305,24 @@ describe("executeMutations transaction reporting", () => {
     ).rejects.toThrow("reverted");
 
     expect(seen).toEqual(["0x0", "0x1"]);
+  });
+
+  it("runs the mutation preflight before every transaction", async () => {
+    const seen: number[] = [];
+    const { publicClient, walletClient } = stubClients(-1);
+
+    await executeMutations({
+      publicClient: publicClient as never,
+      walletClient: walletClient as never,
+      account: {} as never,
+      registryAddress: addr("f"),
+      mutations,
+      beforeMutation: async (_mutation, transactionIndex) => {
+        seen.push(transactionIndex);
+      },
+    });
+
+    expect(seen).toEqual([0, 1, 2]);
   });
 
   it("pins the pending nonce once and increments it after each receipt", async () => {

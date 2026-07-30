@@ -25,7 +25,12 @@ import {
   calculateTopChargebackMerchants,
   type MerchantPolicySnapshot,
 } from "./merchantPolicy.js";
-import { createCuratedGroup, executeMutations, type GroupMutation } from "./onchain.js";
+import {
+  assertMembershipEventsMatchExpected,
+  createCuratedGroup,
+  executeMutations,
+  type GroupMutation,
+} from "./onchain.js";
 import { CHARGEBACKABLE_PAYMENT_METHOD_HASH_SET } from "./paymentMethods.js";
 import { choosePinnedSnapshotBlock } from "./runner.js";
 
@@ -247,6 +252,7 @@ export async function runMerchant(
   }
 
   if (!settings.group) throw new Error("Merchant group configuration is required");
+  const merchantGroup = settings.group;
   const [rpcLatestBlock, indexedThroughBlock] = await Promise.all([
     publicClient.getBlockNumber(),
     indexer.getIndexedThroughBlock(),
@@ -256,25 +262,25 @@ export async function runMerchant(
     rpcLatestBlock,
     confirmationBlocks: BigInt(settings.snapshotConfirmations),
   });
-  if (settings.group.registryDeploymentBlock > snapshotBlock) {
+  if (merchantGroup.registryDeploymentBlock > snapshotBlock) {
     throw new Error("Registry deployment block is greater than the selected snapshot");
   }
   const merchantSnapshot = await loadPinnedMerchantReconciliation({
     indexer,
     snapshotBlock,
     v2Environment: settings.v2HistoryEnvironment,
-    registryAddress: settings.group.registryAddress,
-    groupId: settings.group.groupId,
-    registryDeploymentBlock: settings.group.registryDeploymentBlock,
+    registryAddress: merchantGroup.registryAddress,
+    groupId: merchantGroup.groupId,
+    registryDeploymentBlock: merchantGroup.registryDeploymentBlock,
   });
   assertMerchantGroupBounds(settings, merchantSnapshot.policy);
   const membershipSnapshot = merchantSnapshot.membership;
-  const current = membershipSnapshot.membership.membersByGroupId.get(settings.group.groupId);
+  const current = membershipSnapshot.membership.membersByGroupId.get(merchantGroup.groupId);
   if (!current) throw new Error("Indexer omitted merchant group membership");
   const governance = await readGovernance(
     publicClient,
-    settings.group.registryAddress,
-    settings.group.groupId,
+    merchantGroup.registryAddress,
+    merchantGroup.groupId,
     snapshotBlock,
   );
   assertMerchantGovernance(governance);
@@ -292,7 +298,7 @@ export async function runMerchant(
   if (initialSeed && !settings.allowInitialSeed) {
     throw new Error("Initial merchant seed requires ALLOW_INITIAL_SEED=true");
   }
-  const groupId = settings.group.groupId;
+  const groupId = merchantGroup.groupId;
   const mutations: GroupMutation[] = chunks(additions, settings.batchSize).map((members) => ({
     operation: "add",
     groupId,
@@ -320,24 +326,35 @@ export async function runMerchant(
     throw new Error("GROUP_ADMIN_PRIVATE_KEY is required for merchant sync execution");
   }
   const account = privateKeyToAccount(settings.groupAdminPrivateKey);
-  const currentGovernance = await readGovernance(
-    publicClient,
-    settings.group.registryAddress,
-    settings.group.groupId,
-  );
-  assertMerchantGovernance(currentGovernance, account.address);
   const walletClient = createWalletClient({
     account,
     chain: base,
     transport: http(settings.rpcUrl, { timeout: settings.requestTimeoutMs }),
   });
+  const expectedPostSnapshotAdds = new Set<Address>();
   const transactionHashes = await executeMutations({
     publicClient,
     walletClient,
     account,
-    registryAddress: settings.group.registryAddress,
+    registryAddress: merchantGroup.registryAddress,
     mutations,
-    onTransaction: (hash, mutation) =>
+    beforeMutation: async () => {
+      const currentGovernance = await readGovernance(
+        publicClient,
+        merchantGroup.registryAddress,
+        merchantGroup.groupId,
+      );
+      assertMerchantGovernance(currentGovernance, account.address);
+      await assertMembershipEventsMatchExpected({
+        publicClient,
+        registryAddress: merchantGroup.registryAddress,
+        groupId: merchantGroup.groupId,
+        snapshotBlock,
+        expectedAddedMembers: expectedPostSnapshotAdds,
+      });
+    },
+    onTransaction: (hash, mutation) => {
+      for (const member of mutation.members) expectedPostSnapshotAdds.add(member);
       logger.info(
         {
           hash,
@@ -345,7 +362,8 @@ export async function runMerchant(
           members: mutation.members.length,
         },
         "Merchant seed transaction mined",
-      ),
+      );
+    },
   });
   logger.info(
     { transactionCount: transactionHashes.length },
